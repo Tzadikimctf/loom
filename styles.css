@@ -142,6 +142,47 @@
   margin-top: 1rem;
 }
 
+.loom-settings-section {
+  border-top: 1px solid var(--background-modifier-border);
+  padding: 0.35rem 0;
+}
+
+.loom-settings-section:last-child {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.loom-settings-summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-normal);
+  padding: 0.65rem 0;
+}
+
+.loom-settings-summary:hover {
+  color: var(--text-accent);
+}
+
+.loom-settings-section-body {
+  padding: 0.1rem 0 0.6rem;
+}
+
+.loom-custom-language {
+  margin: 0.45rem 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  background: var(--background-secondary);
+}
+
+.loom-custom-language > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.loom-custom-language-body {
+  margin-top: 0.5rem;
+}
+
 @keyframes loom-spin {
   from {
     transform: rotate(0deg);

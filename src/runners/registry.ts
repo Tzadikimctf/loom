@@ -4,7 +4,7 @@ export class loomRunnerRegistry {
   constructor(private readonly runners: loomRunner[]) {}
 
   getRunnerForBlock(block: loomCodeBlock, settings: loomPluginSettings): loomRunner | null {
-    return this.runners.find((runner) => runner.languages.includes(block.language) && runner.canRun(block, settings)) ?? null;
+    return this.runners.find((runner) => (!runner.languages.length || runner.languages.includes(block.language)) && runner.canRun(block, settings)) ?? null;
   }
 
   getSupportedLanguages(): string[] {

@@ -1,6 +1,6 @@
 # loom
 
-Obsidian plugin for executing ordinary fenced Markdown code blocks. 
+Obsidian plugin for executing ordinary fenced Markdown code blocks
 
 The plugin is intended for research and exploratory work whereby proofs/solver queries and similar artefacts should remain readable directly within the document. loom augments existing code blocks with execution controls and renders transient output beneath the block. The source block itself is left unchanged and isn't rewritten into a plugin specific representation
 
@@ -20,7 +20,31 @@ That ID is used for output replacement and toolbar state therefore rerunning a b
 
 ## Supported languages
 
-Use your brain
+loom includes built in runners for almost every language. The list is too extensive for me to type out because I'm lazy. Additional local languages can be added from the settings tab under **Custom Languages**. A custom language defines:
+
+- name
+- comma separated aliases
+- executable
+- arguments like `{file}`
+- source file extension
+
+For example a custom shell alias could use:
+
+```text
+name: shell-custom
+aliases: shx
+executable: /bin/sh
+args: {file}
+extension: .sh
+```
+
+Then a normal fenced block can run as:
+
+````markdown
+```shx
+echo hello
+```
+````
 
 ## Runner contract
 
@@ -62,6 +86,38 @@ hello
 ````
 
 The parser skips these regions and generated output blocks are never executed
+
+## Container execution
+
+Notes can opt into Docker execution with frontmatter:
+
+```yaml
+loom-container: py-sandbox
+```
+
+Container groups live inside the plugin folder:
+
+```text
+.obsidian/plugins/loom/containers/<group-name>/
+```
+
+Each group needs a `config.json`:
+
+```json
+{
+  "image": "python:3.12-slim",
+  "languages": {
+    "python": {
+      "command": "python3 {file}",
+      "extension": ".py"
+    }
+  }
+}
+```
+
+If the group has a Dockerfile then loom builds it as `loom-container-<group-name>` and uses that image for execution. The group dir is mounted into the container as `/workspace` and temp source files are written there/removed after the run
+
+Make sure Docker is installed and running on the host
 
 
 ## Toolchain(s)

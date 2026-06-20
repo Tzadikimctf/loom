@@ -1,24 +1,6 @@
 import type { TFile } from "obsidian";
 
-export type loomNormalizedLanguage =
-  | "python"
-  | "javascript"
-  | "typescript"
-  | "ocaml"
-  | "c"
-  | "cpp"
-  | "shell"
-  | "ruby"
-  | "perl"
-  | "lua"
-  | "php"
-  | "go"
-  | "rust"
-  | "java"
-  | "llvm-ir"
-  | "lean"
-  | "coq"
-  | "smtlib";
+export type loomNormalizedLanguage = string;
 
 export interface loomCodeBlock {
   id: string;
@@ -93,6 +75,7 @@ export interface loomPluginSettings {
   phpExecutable: string;
   goExecutable: string;
   rustExecutable: string;
+  haskellExecutable: string;
   javaCompilerExecutable: string;
   javaExecutable: string;
   llvmInterpreterExecutable: string;
@@ -101,9 +84,18 @@ export interface loomPluginSettings {
   smtExecutable: string;
   writeOutputToNote: boolean;
   autoRunOnFileOpen: boolean;
+  customLanguages: loomCustomLanguage[];
 }
 
 export interface loomRunState {
   block: loomCodeBlock;
   startedAt: number;
+}
+
+export interface loomCustomLanguage {
+  name: string;
+  aliases: string;
+  executable: string;
+  args: string;
+  extension: string;
 }
