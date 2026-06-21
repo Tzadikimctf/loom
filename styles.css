@@ -192,3 +192,19 @@
     transform: rotate(360deg);
   }
 }
+
+@media print {
+  .loom-code-toolbar {
+    display: none !important;
+  }
+  .loom-output-panel {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+  .loom-print-hide-code {
+    display: none !important;
+  }
+  .loom-print-hide-output {
+    display: none !important;
+  }
+}

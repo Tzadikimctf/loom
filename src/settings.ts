@@ -33,6 +33,7 @@ export const DEFAULT_SETTINGS: loomPluginSettings = {
   writeOutputToNote: false,
   autoRunOnFileOpen: false,
   customLanguages: [],
+  pdfExportMode: "both",
 };
 
 export class loomSettingTab extends PluginSettingTab {
@@ -125,6 +126,21 @@ export class loomSettingTab extends PluginSettingTab {
           this.loomPlugin.settings.autoRunOnFileOpen = value;
           await this.loomPlugin.saveSettings();
         }),
+      );
+
+    new Setting(containerEl)
+      .setName("PDF export mode")
+      .setDesc("Choose what to include when exporting notes containing loom code blocks to PDF.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("both", "Both Code and Output")
+          .addOption("code", "Code Block Only")
+          .addOption("output", "Output Only")
+          .setValue(this.loomPlugin.settings.pdfExportMode || "both")
+          .onChange(async (value) => {
+            this.loomPlugin.settings.pdfExportMode = value as "both" | "code" | "output";
+            await this.loomPlugin.saveSettings();
+          }),
       );
   }
 

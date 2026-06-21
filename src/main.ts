@@ -73,7 +73,17 @@ class loomToolbarRenderChild extends MarkdownRenderChild {
   onload(): void {
     this.codeElement.parentElement?.addClass("loom-codeblock-shell");
     this.codeElement.parentElement?.appendChild(this.plugin.createToolbarElement(this.block));
-    this.panelContainer = this.containerEl.createDiv({ cls: "loom-inline-output-host" });
+
+    if (this.plugin.settings.pdfExportMode === "output") {
+      this.codeElement.classList.add("loom-print-hide-code");
+    }
+
+    const hostClasses = ["loom-inline-output-host"];
+    if (this.plugin.settings.pdfExportMode === "code") {
+      hostClasses.push("loom-print-hide-output");
+    }
+    this.panelContainer = this.containerEl.createDiv({ cls: hostClasses.join(" ") });
+
     this.plugin.renderOutputInto(this.block.id, this.panelContainer);
     this.unregisterOutputListener = this.plugin.registerOutputListener(this.block.id, () => {
       if (this.panelContainer) {
@@ -499,6 +509,12 @@ export default class loomPlugin extends Plugin {
         continue;
       }
 
+      // Skip aliases containing characters that are invalid in CSS selectors (like '+')
+      // to prevent Obsidian's internal querySelectorAll from crashing (e.g. during PDF export).
+      if (/[^a-zA-Z0-9_-]/.test(normalizedAlias)) {
+        continue;
+      }
+
       this.registeredCodeBlockAliases.add(normalizedAlias);
       this.registerMarkdownCodeBlockProcessor(normalizedAlias, async (source, el, ctx) => {
         const filePath = ctx.sourcePath;
@@ -509,9 +525,15 @@ export default class loomPlugin extends Plugin {
 
         const fullText = await this.app.vault.cachedRead(file);
         const blocks = parseMarkdownCodeBlocks(filePath, fullText, this.settings);
-        const section = ctx.getSectionInfo(el);
-        const lineStart = section?.lineStart ?? -1;
-        const block = blocks.find((candidate) => candidate.startLine === lineStart && candidate.content === source);
+        const section = (ctx && typeof ctx.getSectionInfo === "function") ? ctx.getSectionInfo(el) : null;
+        let block: loomCodeBlock | undefined;
+        if (section) {
+          const lineStart = section.lineStart;
+          block = blocks.find((candidate) => candidate.startLine === lineStart && candidate.content === source);
+        } else {
+          // Fallback for print/export context where getSectionInfo is null
+          block = blocks.find((candidate) => candidate.content === source);
+        }
         if (!block) {
           return;
         }

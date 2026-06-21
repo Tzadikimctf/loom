@@ -85,6 +85,7 @@ export interface loomPluginSettings {
   writeOutputToNote: boolean;
   autoRunOnFileOpen: boolean;
   customLanguages: loomCustomLanguage[];
+  pdfExportMode: "both" | "code" | "output";
 }
 
 export interface loomRunState {
