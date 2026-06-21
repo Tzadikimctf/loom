@@ -1,6 +1,6 @@
 import { Notice, PluginSettingTab, Setting, normalizePath } from "obsidian";
 import type loomPlugin from "./main";
-import type { loomPluginSettings } from "./types";
+import type { loomCustomLanguage, loomPluginSettings } from "./types";
 
 export const DEFAULT_SETTINGS: loomPluginSettings = {
   enableLocalExecution: false,
@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS: loomPluginSettings = {
   phpExecutable: "php",
   goExecutable: "go",
   rustExecutable: "rustc",
+  haskellExecutable: "runghc",
   javaCompilerExecutable: "",
   javaExecutable: "java",
   llvmInterpreterExecutable: "lli",
@@ -31,6 +32,7 @@ export const DEFAULT_SETTINGS: loomPluginSettings = {
   smtExecutable: "z3",
   writeOutputToNote: false,
   autoRunOnFileOpen: false,
+  customLanguages: [],
 };
 
 export class loomSettingTab extends PluginSettingTab {
@@ -44,7 +46,20 @@ export class loomSettingTab extends PluginSettingTab {
     containerEl.createEl("h2", { text: "loom" });
     containerEl.createEl("p", { text: "Run supported code fences directly from notes while preserving native syntax highlighting." });
 
-    containerEl.createEl("h3", { text: "Execution" });
+    this.renderGeneralSettings(this.createSection(containerEl, "General Settings", true));
+    this.renderBuiltInRuntimes(this.createSection(containerEl, "Built-in Runtimes"));
+    this.renderCustomLanguages(this.createSection(containerEl, "Custom Languages"));
+    void this.renderContainerGroups(this.createSection(containerEl, "Containerization Groups"));
+  }
+
+  private createSection(containerEl: HTMLElement, title: string, open = false): HTMLElement {
+    const details = containerEl.createEl("details", { cls: "loom-settings-section" });
+    details.open = open;
+    details.createEl("summary", { text: title, cls: "loom-settings-summary" });
+    return details.createDiv({ cls: "loom-settings-section-body" });
+  }
+
+  private renderGeneralSettings(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("Enable local execution")
       .setDesc("Disabled by default. loom runs code on your local machine and does not provide sandboxing.")
@@ -111,27 +126,11 @@ export class loomSettingTab extends PluginSettingTab {
           await this.loomPlugin.saveSettings();
         }),
       );
+  }
 
-    containerEl.createEl("h3", { text: "Runtimes" });
-    new Setting(containerEl)
-      .setName("Python executable")
-      .setDesc("Path or command name for Python.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.pythonExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.pythonExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("Node executable")
-      .setDesc("Path or command name for JavaScript execution.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.nodeExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.nodeExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
+  private renderBuiltInRuntimes(containerEl: HTMLElement): void {
+    this.addTextSetting(containerEl, "Python executable", "Path or command name for Python.", "pythonExecutable");
+    this.addTextSetting(containerEl, "Node executable", "Path or command name for JavaScript execution.", "nodeExecutable");
 
     new Setting(containerEl)
       .setName("TypeScript runner mode")
@@ -147,15 +146,7 @@ export class loomSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl)
-      .setName("TypeScript transpiler executable")
-      .setDesc("Command or path for ts-node or tsx.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.typescriptTranspilerExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.typescriptTranspilerExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
+    this.addTextSetting(containerEl, "TypeScript transpiler executable", "Command or path for ts-node or tsx.", "typescriptTranspilerExecutable");
 
     new Setting(containerEl)
       .setName("OCaml mode")
@@ -172,170 +163,138 @@ export class loomSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl)
-      .setName("OCaml executable")
-      .setDesc("Command or path for ocaml, ocamlc, or dune depending on the selected mode.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.ocamlExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.ocamlExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
+    this.addTextSetting(containerEl, "OCaml executable", "Command or path for ocaml, ocamlc, or dune depending on the selected mode.", "ocamlExecutable");
+    this.addTextSetting(containerEl, "C compiler", "Command or path for compiling C blocks.", "cExecutable");
+    this.addTextSetting(containerEl, "C++ compiler", "Command or path for compiling C++ blocks.", "cppExecutable");
+    this.addTextSetting(containerEl, "Shell executable", "Command or path for Shell, Bash, and sh blocks.", "shellExecutable");
+    this.addTextSetting(containerEl, "Ruby executable", "Command or path for Ruby blocks.", "rubyExecutable");
+    this.addTextSetting(containerEl, "Perl executable", "Command or path for Perl blocks.", "perlExecutable");
+    this.addTextSetting(containerEl, "Lua executable", "Command or path for Lua blocks.", "luaExecutable");
+    this.addTextSetting(containerEl, "PHP executable", "Command or path for PHP blocks.", "phpExecutable");
+    this.addTextSetting(containerEl, "Go executable", "Command or path for Go blocks.", "goExecutable");
+    this.addTextSetting(containerEl, "Rust compiler", "Command or path for compiling Rust blocks.", "rustExecutable");
+    this.addTextSetting(containerEl, "Haskell executable", "Command or path for Haskell blocks. Defaults to runghc.", "haskellExecutable");
+    this.addTextSetting(containerEl, "Java compiler", "Optional command or path for javac. Leave empty to use Java source-file mode.", "javaCompilerExecutable");
+    this.addTextSetting(containerEl, "Java executable", "Command or path for running compiled Java blocks.", "javaExecutable");
+    this.addTextSetting(containerEl, "LLVM IR interpreter", "Command or path for running LLVM IR blocks with lli.", "llvmInterpreterExecutable");
+    this.addTextSetting(containerEl, "Lean executable", "Command or path for checking Lean blocks.", "leanExecutable");
+    this.addTextSetting(containerEl, "Coq executable", "Command or path for checking Coq blocks with coqc.", "coqExecutable");
+    this.addTextSetting(containerEl, "SMT solver", "Command or path for SMT-LIB blocks. Defaults to z3.", "smtExecutable");
+  }
+
+  private renderCustomLanguages(containerEl: HTMLElement): void {
+    const listEl = containerEl.createDiv({ cls: "loom-custom-language-list" });
+    this.renderCustomLanguageList(listEl);
 
     new Setting(containerEl)
-      .setName("C compiler")
-      .setDesc("Command or path for compiling C blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.cExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.cExecutable = value.trim();
+      .setName("Add custom language")
+      .setDesc("Create a new local command-backed language.")
+      .addButton((button) =>
+        button.setButtonText("+").onClick(async () => {
+          this.loomPlugin.settings.customLanguages.push({
+            name: "custom-language",
+            aliases: "",
+            executable: "",
+            args: "{file}",
+            extension: ".txt",
+          });
           await this.loomPlugin.saveSettings();
+          this.display();
         }),
       );
+  }
 
-    new Setting(containerEl)
-      .setName("C++ compiler")
-      .setDesc("Command or path for compiling C++ blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.cppExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.cppExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
+  private renderCustomLanguageList(containerEl: HTMLElement): void {
+    containerEl.empty();
 
-    new Setting(containerEl)
-      .setName("Shell executable")
-      .setDesc("Command or path for Shell, Bash, and sh blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.shellExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.shellExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
+    if (!this.loomPlugin.settings.customLanguages.length) {
+      containerEl.createEl("p", {
+        text: "No custom languages configured.",
+        cls: "setting-item-description",
+      });
+      return;
+    }
 
-    new Setting(containerEl)
-      .setName("Ruby executable")
-      .setDesc("Command or path for Ruby blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.rubyExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.rubyExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
+    this.loomPlugin.settings.customLanguages.forEach((language, index) => {
+      const details = containerEl.createEl("details", { cls: "loom-custom-language" });
+      details.open = true;
+      details.createEl("summary", { text: language.name || `Custom language ${index + 1}` });
+      const body = details.createDiv({ cls: "loom-custom-language-body" });
 
-    new Setting(containerEl)
-      .setName("Perl executable")
-      .setDesc("Command or path for Perl blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.perlExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.perlExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
+      this.addCustomLanguageTextSetting(body, language, "Name", "Normalized language id used by loom.", "name");
+      this.addCustomLanguageTextSetting(body, language, "Aliases", "Comma-separated fence aliases.", "aliases");
+      this.addCustomLanguageTextSetting(body, language, "Executable", "Local command or absolute executable path.", "executable");
+      this.addCustomLanguageTextSetting(body, language, "Arguments", "Space-separated arguments. Use {file} for the temp source file.", "args");
+      this.addCustomLanguageTextSetting(body, language, "Extension", "Temp source file extension, for example .py.", "extension");
 
-    new Setting(containerEl)
-      .setName("Lua executable")
-      .setDesc("Command or path for Lua blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.luaExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.luaExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("PHP executable")
-      .setDesc("Command or path for PHP blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.phpExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.phpExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("Go executable")
-      .setDesc("Command or path for Go blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.goExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.goExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("Rust compiler")
-      .setDesc("Command or path for compiling Rust blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.rustExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.rustExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("Java compiler")
-      .setDesc("Optional command or path for javac. Leave empty to use Java source-file mode.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.javaCompilerExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.javaCompilerExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("LLVM IR interpreter")
-      .setDesc("Command or path for running LLVM IR blocks with lli.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.llvmInterpreterExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.llvmInterpreterExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("Lean executable")
-      .setDesc("Command or path for checking Lean blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.leanExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.leanExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("Coq executable")
-      .setDesc("Command or path for checking Coq blocks with coqc.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.coqExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.coqExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("SMT solver")
-      .setDesc("Command or path for SMT-LIB blocks. Defaults to z3.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.smtExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.smtExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("Java executable")
-      .setDesc("Command or path for running compiled Java blocks.")
-      .addText((text) =>
-        text.setValue(this.loomPlugin.settings.javaExecutable).onChange(async (value) => {
-          this.loomPlugin.settings.javaExecutable = value.trim();
-          await this.loomPlugin.saveSettings();
-        }),
-      );
-
-    containerEl.createEl("p", {
-      text: "Missing runtime executables will surface as run errors. loom never claims sandboxing and executes code with your configured commands.",
-      cls: "setting-item-description",
+      new Setting(body)
+        .setName("Delete language")
+        .setDesc("Remove this custom language.")
+        .addButton((button) =>
+          button.setButtonText("Delete").setWarning().onClick(async () => {
+            this.loomPlugin.settings.customLanguages.splice(index, 1);
+            await this.loomPlugin.saveSettings();
+            this.display();
+          }),
+        );
     });
+  }
+
+  private async renderContainerGroups(containerEl: HTMLElement): Promise<void> {
+    const listEl = containerEl.createDiv({ cls: "loom-container-group-list" });
+    listEl.setText("Scanning container groups...");
+
+    const groups = await this.loomPlugin.getContainerGroupSummaries();
+    listEl.empty();
+
+    if (!groups.length) {
+      listEl.createEl("p", {
+        text: "No container groups found in .obsidian/plugins/loom/containers.",
+        cls: "setting-item-description",
+      });
+      return;
+    }
+
+    for (const group of groups) {
+      new Setting(listEl)
+        .setName(group.name)
+        .setDesc(group.status)
+        .addButton((button) =>
+          button.setButtonText("Build / rebuild").onClick(async () => {
+            await this.loomPlugin.buildContainerGroup(group.name);
+          }),
+        );
+    }
+  }
+
+  private addTextSetting<K extends keyof loomPluginSettings>(containerEl: HTMLElement, name: string, description: string, key: K): void {
+    new Setting(containerEl)
+      .setName(name)
+      .setDesc(description)
+      .addText((text) =>
+        text.setValue(String(this.loomPlugin.settings[key] ?? "")).onChange(async (value) => {
+          (this.loomPlugin.settings[key] as string) = value.trim();
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+  }
+
+  private addCustomLanguageTextSetting<K extends keyof loomCustomLanguage>(
+    containerEl: HTMLElement,
+    language: loomCustomLanguage,
+    name: string,
+    description: string,
+    key: K,
+  ): void {
+    new Setting(containerEl)
+      .setName(name)
+      .setDesc(description)
+      .addText((text) =>
+        text.setValue(language[key]).onChange(async (value) => {
+          language[key] = value.trim();
+          await this.loomPlugin.saveSettings();
+        }),
+      );
   }
 }
 

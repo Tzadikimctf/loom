@@ -53,6 +53,13 @@ const INTERPRETED_SPECS: InterpretedSpec[] = [
     },
     minimumTimeoutMs: 30_000,
   },
+  {
+    language: "haskell",
+    displayName: "Haskell",
+    executable: (settings) => settings.haskellExecutable,
+    fileExtension: ".hs",
+    minimumTimeoutMs: 30_000,
+  },
 ];
 
 export class InterpretedRunner implements loomRunner {

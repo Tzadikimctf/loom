@@ -10,8 +10,10 @@ import {
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, ViewUpdate, WidgetType } from "@codemirror/view";
 import { dirname } from "path";
+import { loomContainerRunner } from "./execution/containerRunner";
 import { findBlockAtLine, getSupportedLanguageAliases, parseMarkdownCodeBlocks } from "./parser";
 import { NodeRunner } from "./runners/node";
+import { CustomLanguageRunner } from "./runners/custom";
 import { InterpretedRunner } from "./runners/interpreted";
 import { LlvmRunner } from "./runners/llvm";
 import { ManagedCompiledRunner } from "./runners/managedCompiled";
@@ -133,7 +135,10 @@ export default class loomPlugin extends Plugin {
     new ManagedCompiledRunner(),
     new LlvmRunner(),
     new ProofRunner(),
+    new CustomLanguageRunner(),
   ]);
+  private readonly containerRunner = new loomContainerRunner(this.app, this.manifest.dir ?? ".obsidian/plugins/loom");
+  private readonly registeredCodeBlockAliases = new Set<string>();
   private readonly outputs = new Map<string, loomStoredOutput>();
   private readonly running = new Map<string, AbortController>();
   private readonly outputListeners = new Map<string, Set<() => void>>();
@@ -158,7 +163,7 @@ export default class loomPlugin extends Plugin {
           return;
         }
 
-        const blocks = parseMarkdownCodeBlocks(file.path, editor.getValue());
+        const blocks = parseMarkdownCodeBlocks(file.path, editor.getValue(), this.settings);
         const block = findBlockAtLine(blocks, editor.getCursor().line);
         if (!block) {
           new Notice("No supported loom block at the current cursor.");
@@ -198,27 +203,7 @@ export default class loomPlugin extends Plugin {
       },
     });
 
-    for (const alias of getSupportedLanguageAliases()) {
-      this.registerMarkdownCodeBlockProcessor(alias, async (source, el, ctx) => {
-        const filePath = ctx.sourcePath;
-        const file = this.app.vault.getAbstractFileByPath(filePath);
-        if (!(file instanceof TFile)) {
-          return;
-        }
-
-        const fullText = await this.app.vault.cachedRead(file);
-        const blocks = parseMarkdownCodeBlocks(filePath, fullText);
-        const section = ctx.getSectionInfo(el);
-        const lineStart = section?.lineStart ?? -1;
-        const block = blocks.find((candidate) => candidate.startLine === lineStart && candidate.content === source);
-        if (!block) {
-          return;
-        }
-
-        const pre = el.querySelector("pre") ?? el;
-        ctx.addChild(new loomToolbarRenderChild(el, this, block, pre as HTMLElement));
-      });
-    }
+    this.registerCodeBlockProcessors();
 
     this.registerEditorExtension(this.createLivePreviewExtension());
 
@@ -231,6 +216,15 @@ export default class loomPlugin extends Plugin {
         }
       }),
     );
+
+    this.addCommand({
+      id: "loom-validate-container-groups",
+      name: "loom: Validate Container Groups",
+      callback: async () => {
+        const groups = await this.getContainerGroupSummaries();
+        new Notice(groups.length ? groups.map((group) => `${group.name}: ${group.status}`).join("\n") : "No loom container groups found.", 8000);
+      },
+    });
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
@@ -262,6 +256,7 @@ export default class loomPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+    this.registerCodeBlockProcessors();
     this.refreshAllViews();
   }
 
@@ -333,8 +328,9 @@ export default class loomPlugin extends Plugin {
 
   async runAllBlocksInFile(file: TFile): Promise<void> {
     const source = await this.app.vault.cachedRead(file);
-    const blocks = parseMarkdownCodeBlocks(file.path, source);
-    const supportedBlocks = blocks.filter((block) => this.registry.getRunnerForBlock(block, this.settings));
+    const blocks = parseMarkdownCodeBlocks(file.path, source, this.settings);
+    const containerGroup = this.containerRunner.getContainerGroupName(file);
+    const supportedBlocks = containerGroup ? blocks : blocks.filter((block) => this.registry.getRunnerForBlock(block, this.settings));
 
     if (!supportedBlocks.length) {
       new Notice("No supported loom blocks found in the current note.");
@@ -348,7 +344,7 @@ export default class loomPlugin extends Plugin {
 
   async clearOutputsForFile(file: TFile): Promise<void> {
     const source = await this.app.vault.cachedRead(file);
-    const blocks = parseMarkdownCodeBlocks(file.path, source);
+    const blocks = parseMarkdownCodeBlocks(file.path, source, this.settings);
     for (const block of blocks) {
       this.outputs.delete(block.id);
       this.notifyOutputChanged(block.id);
@@ -368,29 +364,31 @@ export default class loomPlugin extends Plugin {
       return;
     }
 
-    const runner = this.registry.getRunnerForBlock(block, this.settings);
+    const workingDirectory = this.resolveWorkingDirectory(file);
+    const containerGroup = this.containerRunner.getContainerGroupName(file);
+    const runner = containerGroup ? null : this.registry.getRunnerForBlock(block, this.settings);
     if (!runner) {
-      new Notice(`No configured runner for ${block.language}.`);
-      return;
+      if (!containerGroup) {
+        new Notice(`No configured runner for ${block.language}.`);
+        return;
+      }
     }
 
     const controller = new AbortController();
+    const runContext = {
+      file,
+      workingDirectory,
+      timeoutMs: this.settings.defaultTimeoutMs,
+      signal: controller.signal,
+    };
     this.running.set(block.id, controller);
     this.notifyOutputChanged(block.id);
     this.updateStatusBar();
 
     try {
-      const workingDirectory = this.resolveWorkingDirectory(file);
-      const result = await runner.run(
-        block,
-        {
-          file,
-          workingDirectory,
-          timeoutMs: this.settings.defaultTimeoutMs,
-          signal: controller.signal,
-        },
-        this.settings,
-      );
+      const result = containerGroup
+        ? await this.containerRunner.run(block, runContext, this.settings, containerGroup)
+        : await runner!.run(block, runContext, this.settings);
 
       if (result.timedOut) {
         result.stderr = result.stderr || `Execution timed out after ${this.settings.defaultTimeoutMs} ms.`;
@@ -412,7 +410,8 @@ export default class loomPlugin extends Plugin {
         await this.writeManagedOutputBlock(file, block, result);
       }
 
-      new Notice(result.success ? `loom ran ${runner.displayName} block.` : `loom run failed for ${runner.displayName}.`);
+      const runnerName = containerGroup ? `container ${containerGroup}` : runner!.displayName;
+      new Notice(result.success ? `loom ran ${runnerName} block.` : `loom run failed for ${runnerName}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.outputs.set(block.id, {
@@ -421,8 +420,8 @@ export default class loomPlugin extends Plugin {
         collapsed: false,
         visible: true,
         result: {
-          runnerId: runner.id,
-          runnerName: runner.displayName,
+          runnerId: containerGroup ? `container:${containerGroup}` : runner?.id ?? "unknown",
+          runnerName: containerGroup ? `Container ${containerGroup}` : runner?.displayName ?? "Unknown",
           startedAt: new Date().toISOString(),
           finishedAt: new Date().toISOString(),
           durationMs: 0,
@@ -483,6 +482,46 @@ export default class loomPlugin extends Plugin {
     return resolved || process.cwd();
   }
 
+  async getContainerGroupSummaries(): Promise<Array<{ name: string; status: string }>> {
+    return this.containerRunner.getGroupSummaries();
+  }
+
+  async buildContainerGroup(name: string): Promise<void> {
+    const controller = new AbortController();
+    const result = await this.containerRunner.buildGroup(name, Math.max(this.settings.defaultTimeoutMs, 120_000), controller.signal);
+    new Notice(result.success ? `loom built container group ${name}.` : `loom container build failed for ${name}.`, 8000);
+  }
+
+  registerCodeBlockProcessors(): void {
+    for (const alias of getSupportedLanguageAliases(this.settings)) {
+      const normalizedAlias = alias.toLowerCase();
+      if (this.registeredCodeBlockAliases.has(normalizedAlias)) {
+        continue;
+      }
+
+      this.registeredCodeBlockAliases.add(normalizedAlias);
+      this.registerMarkdownCodeBlockProcessor(normalizedAlias, async (source, el, ctx) => {
+        const filePath = ctx.sourcePath;
+        const file = this.app.vault.getAbstractFileByPath(filePath);
+        if (!(file instanceof TFile)) {
+          return;
+        }
+
+        const fullText = await this.app.vault.cachedRead(file);
+        const blocks = parseMarkdownCodeBlocks(filePath, fullText, this.settings);
+        const section = ctx.getSectionInfo(el);
+        const lineStart = section?.lineStart ?? -1;
+        const block = blocks.find((candidate) => candidate.startLine === lineStart && candidate.content === source);
+        if (!block) {
+          return;
+        }
+
+        const pre = el.querySelector("pre") ?? el;
+        ctx.addChild(new loomToolbarRenderChild(el, this, block, pre as HTMLElement));
+      });
+    }
+  }
+
   private updateStatusBar(): void {
     const activeRuns = this.running.size;
     this.statusBarItemEl.setText(activeRuns ? `loom: ${activeRuns} Active Run${activeRuns === 1 ? "" : "s"}` : "loom: Idle");
@@ -534,7 +573,7 @@ export default class loomPlugin extends Plugin {
     }
 
     const source = view.editor?.getValue?.() ?? (await this.app.vault.cachedRead(view.file));
-    const blocks = parseMarkdownCodeBlocks(view.file.path, source);
+    const blocks = parseMarkdownCodeBlocks(view.file.path, source, this.settings);
     if (!blocks.length) {
       return;
     }
@@ -562,7 +601,7 @@ export default class loomPlugin extends Plugin {
       return this.outputs.get(blockId)?.block ?? null;
     }
 
-    const blocks = parseMarkdownCodeBlocks(file.path, editor.getValue());
+    const blocks = parseMarkdownCodeBlocks(file.path, editor.getValue(), this.settings);
     return blocks.find((block) => block.id === blockId) ?? this.outputs.get(blockId)?.block ?? null;
   }
 
@@ -596,7 +635,7 @@ export default class loomPlugin extends Plugin {
           }
 
           const source = this.view.state.doc.toString();
-          const blocks = parseMarkdownCodeBlocks(file.path, source);
+          const blocks = parseMarkdownCodeBlocks(file.path, source, plugin.settings);
           const builder = new RangeSetBuilder<Decoration>();
 
           for (const block of blocks) {
@@ -635,7 +674,7 @@ export default class loomPlugin extends Plugin {
   private async writeManagedOutputBlock(file: TFile, block: loomCodeBlock, result: loomStoredOutput["result"]): Promise<void> {
     await this.app.vault.process(file, (content) => {
       const lines = content.split(/\r?\n/);
-      const blocks = parseMarkdownCodeBlocks(file.path, content);
+      const blocks = parseMarkdownCodeBlocks(file.path, content, this.settings);
       const currentBlock = blocks.find((candidate) => candidate.id === block.id);
       const rendered = this.renderManagedOutputMarkdown(block.id, result);
       const existingRange = this.findManagedOutputRange(lines, block.id);
