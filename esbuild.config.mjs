@@ -9,10 +9,6 @@ const pluginName = "loom";
 // Always deploy to both workspace vaults if they exist
 const explicitDeployDirs = [
   path.resolve("../../.obsidian/plugins/loom"),
-  "/mnt/c/Users/thomy/Obsidian notes/.obsidian/plugins/loom",
-  "C:/Users/thomy/Obsidian notes/.obsidian/plugins/loom",
-  "/mnt/c/Users/thomy/Loom-Test-Vault/.obsidian/plugins/loom",
-  "C:/Users/thomy/Loom-Test-Vault/.obsidian/plugins/loom",
   ...(process.env.LOOM_PLUGIN_DIRS ?? "")
     .split(path.delimiter)
     .map((value) => value.trim())
