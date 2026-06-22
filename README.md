@@ -27,6 +27,8 @@ loom includes built in runners for almost every language. The list is too extens
 - executable
 - arguments like `{file}`
 - source file extension
+- optional extractor executable
+- optional extractor arguments like `{request}`
 
 For example a custom shell alias could use:
 
@@ -45,6 +47,77 @@ Then a normal fenced block can run as:
 echo hello
 ```
 ````
+
+Custom languages can also support runnable partial source extraction. Each custom language chooses its own strategy:
+
+- extractor command
+- transpile to C
+
+Use an extractor command when the language has its own parser, compiler API, or LSP. Use transpile to C when the language already lowers to C and can provide a symbol map.
+
+loom writes a JSON request file and passes it to the configured command through the configured arguments. The command should print JSON to stdout.
+
+Request shape:
+
+```json
+{
+  "language": "toy",
+  "filePath": "src/example.toy",
+  "symbolName": "main",
+  "lineStart": null,
+  "lineEnd": null,
+  "traceDependencies": true,
+  "sourceFile": "/tmp/loom-extract/source.txt",
+  "harnessFile": "/tmp/loom-extract/harness.txt"
+}
+```
+
+Supported argument placeholders:
+
+- `{request}`
+- `{source}` or `{file}`
+- `{harness}`
+- `{symbol}`
+- `{lineStart}`
+- `{lineEnd}`
+- `{deps}`
+- `{language}`
+
+The extractor can return a complete runnable source:
+
+```json
+{
+  "description": "src/example.toy#main",
+  "content": "..."
+}
+```
+
+Or it can return structured parts:
+
+```json
+{
+  "imports": ["..."],
+  "dependencies": ["..."],
+  "selected": "..."
+}
+```
+
+The transpile to C strategy returns generated C or C++ and a symbol map:
+
+```json
+{
+  "language": "c",
+  "generatedSource": "int toy_score_impl(int x) { return x + 1; }",
+  "symbols": {
+    "score": "toy_score_impl"
+  },
+  "harness": "int main(void) { return toy_score_impl(1); }"
+}
+```
+
+`language` can be `c` or `cpp`. `symbols` maps source language names to generated C or C++ names. `harness` is optional, but useful when the note harness is written in the source language instead of generated C.
+
+If no extractor is configured for a custom language, loom falls back to generic line extraction and simple symbol slicing.
 
 ## Runner contract
 
@@ -102,6 +175,8 @@ Paths that start with `/` are read from the vault root. Other paths are read rel
 Use `loom-lines=L10-L30` for a line range, or `loom-symbol=name` for a function, class, or similar definition. Add `loom-deps=false` when you only want the selected slice.
 
 By default, loom also pulls in imports, includes, and referenced definitions that it can identify. The code in the note is appended after the extracted source, so it can call the function or run a small harness.
+
+Python uses the standard library AST parser for symbol ranges, import analysis, alias handling, local module resolution, and recursive dependency tracing. C and C++ trace top level includes, macros, functions, types, and globals. LLVM IR traces `@symbol` definitions and declarations. Haskell and OCaml trace top level imports and bindings. Other languages use the generic extractor unless a custom extractor command is configured.
 
 ## Container execution
 

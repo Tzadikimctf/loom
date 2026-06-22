@@ -109,4 +109,9 @@ export interface loomCustomLanguage {
   executable: string;
   args: string;
   extension: string;
+  extractorMode?: "command" | "transpile-c";
+  extractorExecutable?: string;
+  extractorArgs?: string;
+  transpileExecutable?: string;
+  transpileArgs?: string;
 }

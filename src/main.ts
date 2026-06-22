@@ -28,6 +28,7 @@ import { DEFAULT_SETTINGS, loomSettingTab, showExecutionDisabledNotice } from ".
 import { resolveReferencedSource } from "./sourceExtract";
 import { createCodeBlockToolbar } from "./ui/codeBlockToolbar";
 import { createOutputPanel, createRunningPanel } from "./ui/outputPanel";
+import { splitCommandLine } from "./utils/command";
 import type { loomCodeBlock, loomPluginSettings, loomStoredOutput } from "./types";
 
 const loomRefreshEffect = StateEffect.define<void>();
@@ -557,11 +558,20 @@ export default class loomPlugin extends Plugin {
       throw new Error(`Referenced source file not found: ${referencePath}`);
     }
 
-    const resolved = resolveReferencedSource(
+    const resolved = await resolveReferencedSource(
       await this.app.vault.cachedRead(sourceFile),
       { ...block.sourceReference, filePath: referencePath },
       block.language,
       block.content,
+      {
+        pythonExecutable: this.settings.pythonExecutable.trim() || "python3",
+        externalExtractor: this.getCustomLanguageExtractor(block.language, file),
+        readFile: async (filePath) => {
+          const importedFile = this.app.vault.getAbstractFileByPath(normalizePath(filePath));
+          return importedFile instanceof TFile ? this.app.vault.cachedRead(importedFile) : null;
+        },
+        resolvePythonImport: async (fromFilePath, moduleName, level) => this.resolvePythonImportVaultPath(fromFilePath, moduleName, level),
+      },
     );
 
     return {
@@ -584,6 +594,50 @@ export default class loomPlugin extends Plugin {
 
     const baseDir = dirname(file.path);
     return normalizePath(baseDir === "." ? trimmed : `${baseDir}/${trimmed}`);
+  }
+
+  private resolvePythonImportVaultPath(fromFilePath: string, moduleName: string, level: number): string | null {
+    const modulePath = moduleName
+      .split(".")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .join("/");
+    const fromDir = dirname(fromFilePath);
+    const baseDirs = level > 0
+      ? [this.ascendVaultPath(fromDir === "." ? "" : fromDir, level - 1)]
+      : [fromDir === "." ? "" : fromDir, ""];
+
+    for (const baseDir of baseDirs) {
+      const candidates = this.getPythonImportCandidates(baseDir, modulePath);
+      for (const candidate of candidates) {
+        const normalized = normalizePath(candidate);
+        if (this.app.vault.getAbstractFileByPath(normalized) instanceof TFile) {
+          return normalized;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private getPythonImportCandidates(baseDir: string, modulePath: string): string[] {
+    const prefix = baseDir ? `${baseDir}/` : "";
+    if (!modulePath) {
+      return [`${prefix}__init__.py`];
+    }
+    return [
+      `${prefix}${modulePath}.py`,
+      `${prefix}${modulePath}/__init__.py`,
+    ];
+  }
+
+  private ascendVaultPath(path: string, levels: number): string {
+    let current = path;
+    for (let index = 0; index < levels; index += 1) {
+      const next = dirname(current);
+      current = next === "." ? "" : next;
+    }
+    return current;
   }
 
   async getContainerGroupSummaries(): Promise<Array<{ name: string; status: string }>> {
@@ -821,6 +875,37 @@ export default class loomPlugin extends Plugin {
         decorations: (value) => value.decorations,
       },
     );
+  }
+
+  private getCustomLanguageExtractor(languageId: string, file: TFile): { mode: "command" | "transpile-c"; language: string; executable: string; args: string[]; workingDirectory: string; timeoutMs: number } | undefined {
+    const normalized = languageId.trim().toLowerCase();
+    const language = this.settings.customLanguages.find((candidate) => {
+      const name = candidate.name.trim().toLowerCase();
+      const aliases = candidate.aliases
+        .split(",")
+        .map((alias) => alias.trim().toLowerCase())
+        .filter(Boolean);
+      return name === normalized || aliases.includes(normalized);
+    });
+    if (!language) {
+      return undefined;
+    }
+
+    const mode = language.extractorMode || "command";
+    const executable = mode === "transpile-c" ? language.transpileExecutable?.trim() : language.extractorExecutable?.trim();
+    const args = mode === "transpile-c" ? language.transpileArgs || "{request}" : language.extractorArgs || "{request}";
+    if (!executable) {
+      return undefined;
+    }
+
+    return {
+      mode,
+      language: language.name,
+      executable,
+      args: splitCommandLine(args),
+      workingDirectory: this.resolveWorkingDirectory(file),
+      timeoutMs: this.settings.defaultTimeoutMs,
+    };
   }
 
   private async writeManagedOutputBlock(file: TFile, block: loomCodeBlock, result: loomStoredOutput["result"]): Promise<void> {

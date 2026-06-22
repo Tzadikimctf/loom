@@ -218,6 +218,11 @@ export class loomSettingTab extends PluginSettingTab {
             executable: "",
             args: "{file}",
             extension: ".txt",
+            extractorMode: "command",
+            extractorExecutable: "",
+            extractorArgs: "{request}",
+            transpileExecutable: "",
+            transpileArgs: "{request}",
           });
           await this.loomPlugin.saveSettings();
           this.display();
@@ -247,6 +252,25 @@ export class loomSettingTab extends PluginSettingTab {
       this.addCustomLanguageTextSetting(body, language, "Executable", "Local command or absolute executable path.", "executable");
       this.addCustomLanguageTextSetting(body, language, "Arguments", "Space-separated arguments. Use {file} for the temp source file.", "args");
       this.addCustomLanguageTextSetting(body, language, "Extension", "Temp source file extension, for example .py.", "extension");
+
+      new Setting(body)
+        .setName("Partial extraction strategy")
+        .setDesc("Choose how this custom language supports partial runnable source.")
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption("command", "Extractor command")
+            .addOption("transpile-c", "Transpile to C")
+            .setValue(language.extractorMode || "command")
+            .onChange(async (value) => {
+              language.extractorMode = value as "command" | "transpile-c";
+              await this.loomPlugin.saveSettings();
+            }),
+        );
+
+      this.addCustomLanguageTextSetting(body, language, "Extractor executable", "Optional command for partial source extraction. Leave empty to use generic line and symbol extraction.", "extractorExecutable");
+      this.addCustomLanguageTextSetting(body, language, "Extractor arguments", "Arguments for the extractor. Use {request}, {source}, {harness}, {symbol}, {lineStart}, {lineEnd}, {deps}, and {language}.", "extractorArgs");
+      this.addCustomLanguageTextSetting(body, language, "Transpile to C executable", "Optional command that emits generated C and a symbol map as JSON.", "transpileExecutable");
+      this.addCustomLanguageTextSetting(body, language, "Transpile to C arguments", "Arguments for the transpiler. Use the same placeholders as extractor arguments.", "transpileArgs");
 
       new Setting(body)
         .setName("Delete language")
@@ -381,8 +405,8 @@ export class loomSettingTab extends PluginSettingTab {
       .setName(name)
       .setDesc(description)
       .addText((text) =>
-        text.setValue(language[key]).onChange(async (value) => {
-          language[key] = value.trim();
+        text.setValue(String(language[key] ?? "")).onChange(async (value) => {
+          (language[key] as string | undefined) = value.trim();
           await this.loomPlugin.saveSettings();
         }),
       );
@@ -907,6 +931,3 @@ class EditContainerGroupModal extends Modal {
     }
   }
 }
-
-
-
