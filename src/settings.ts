@@ -32,6 +32,8 @@ export const DEFAULT_SETTINGS: loomPluginSettings = {
   smtExecutable: "z3",
   writeOutputToNote: false,
   autoRunOnFileOpen: false,
+  extractedSourcePreviewMode: "collapsed",
+  showLanguageCapabilityMetadata: true,
   customLanguages: [],
   pdfExportMode: "both",
   defaultContainerGroup: "",
@@ -129,6 +131,31 @@ export class loomSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.loomPlugin.settings.autoRunOnFileOpen).onChange(async (value) => {
           this.loomPlugin.settings.autoRunOnFileOpen = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Extracted source preview")
+      .setDesc("Choose how loom shows the materialized source for blocks that use loom-file.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("collapsed", "Collapsed")
+          .addOption("expanded", "Expanded")
+          .addOption("hidden", "Hidden")
+          .setValue(this.loomPlugin.settings.extractedSourcePreviewMode || "collapsed")
+          .onChange(async (value) => {
+            this.loomPlugin.settings.extractedSourcePreviewMode = value as "collapsed" | "expanded" | "hidden";
+            await this.loomPlugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Show capability metadata")
+      .setDesc("Show symbol, dependency, and harness capability metadata in extracted source preview headers.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.showLanguageCapabilityMetadata ?? true).onChange(async (value) => {
+          this.loomPlugin.settings.showLanguageCapabilityMetadata = value;
           await this.loomPlugin.saveSettings();
         }),
       );

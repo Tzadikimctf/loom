@@ -23,6 +23,13 @@ export interface loomSourceReference {
   lineEnd?: number;
   symbolName?: string;
   traceDependencies: boolean;
+  call?: loomSourceCallHarness;
+}
+
+export interface loomSourceCallHarness {
+  expression?: string;
+  args?: string;
+  print: boolean;
 }
 
 export interface loomRunContext {
@@ -59,8 +66,25 @@ export interface loomStoredOutput {
   blockId: string;
   block: loomCodeBlock;
   result: loomRunResult;
+  sourcePreview?: loomSourcePreview;
   collapsed: boolean;
   visible: boolean;
+}
+
+export interface loomSourcePreview {
+  description: string;
+  language: loomNormalizedLanguage;
+  content: string;
+  capability?: loomLanguageCapabilitySnapshot;
+  expanded: boolean;
+  showCapabilityMetadata: boolean;
+}
+
+export interface loomLanguageCapabilitySnapshot {
+  symbolExtraction: string;
+  dependencyTracing: string;
+  callHarness: string;
+  sourcePreview: boolean;
 }
 
 export interface loomPluginSettings {
@@ -93,6 +117,8 @@ export interface loomPluginSettings {
   smtExecutable: string;
   writeOutputToNote: boolean;
   autoRunOnFileOpen: boolean;
+  extractedSourcePreviewMode: "collapsed" | "expanded" | "hidden";
+  showLanguageCapabilityMetadata: boolean;
   customLanguages: loomCustomLanguage[];
   pdfExportMode: "both" | "code" | "output";
   defaultContainerGroup: string;

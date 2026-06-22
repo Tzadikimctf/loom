@@ -14,6 +14,7 @@ import { dirname } from "path";
 import { loomContainerRunner } from "./execution/containerRunner";
 import { addLlvmDecorations, highlightLlvmElement } from "./llvmHighlight";
 import { findBlockAtLine, getSupportedLanguageAliases, parseMarkdownCodeBlocks } from "./parser";
+import { getLanguageCapability } from "./languageCapabilities";
 import { NodeRunner } from "./runners/node";
 import { CustomLanguageRunner } from "./runners/custom";
 import { InterpretedRunner } from "./runners/interpreted";
@@ -26,6 +27,7 @@ import { ProofRunner } from "./runners/proof";
 import { loomRunnerRegistry } from "./runners/registry";
 import { DEFAULT_SETTINGS, loomSettingTab, showExecutionDisabledNotice } from "./settings";
 import { resolveReferencedSource } from "./sourceExtract";
+import { buildSourceReferenceHarness } from "./sourceHarness";
 import { createCodeBlockToolbar } from "./ui/codeBlockToolbar";
 import { createOutputPanel, createRunningPanel } from "./ui/outputPanel";
 import { splitCommandLine } from "./utils/command";
@@ -458,8 +460,8 @@ export default class loomPlugin extends Plugin {
         result.stderr = "Process exited unsuccessfully.";
       }
 
-      if (resolvedBlock.sourceDescription) {
-        const sourceNotice = `Ran extracted source from ${resolvedBlock.sourceDescription}.`;
+      if (resolvedBlock.sourcePreview) {
+        const sourceNotice = `Ran extracted source from ${resolvedBlock.sourcePreview.description}.`;
         result.warning = result.warning ? `${sourceNotice}\n${result.warning}` : sourceNotice;
       }
 
@@ -467,6 +469,7 @@ export default class loomPlugin extends Plugin {
         blockId: block.id,
         block,
         result,
+        sourcePreview: resolvedBlock.sourcePreview,
         collapsed: false,
         visible: true,
       });
@@ -547,7 +550,7 @@ export default class loomPlugin extends Plugin {
     return resolved || process.cwd();
   }
 
-  private async resolveExecutableBlock(file: TFile, block: loomCodeBlock): Promise<{ block: loomCodeBlock; sourceDescription?: string }> {
+  private async resolveExecutableBlock(file: TFile, block: loomCodeBlock): Promise<{ block: loomCodeBlock; sourcePreview?: loomStoredOutput["sourcePreview"] }> {
     if (!block.sourceReference) {
       return { block };
     }
@@ -558,14 +561,16 @@ export default class loomPlugin extends Plugin {
       throw new Error(`Referenced source file not found: ${referencePath}`);
     }
 
+    const harness = buildSourceReferenceHarness(block);
+    const externalExtractor = this.getCustomLanguageExtractor(block.language, file);
     const resolved = await resolveReferencedSource(
       await this.app.vault.cachedRead(sourceFile),
       { ...block.sourceReference, filePath: referencePath },
       block.language,
-      block.content,
+      harness,
       {
         pythonExecutable: this.settings.pythonExecutable.trim() || "python3",
-        externalExtractor: this.getCustomLanguageExtractor(block.language, file),
+        externalExtractor,
         readFile: async (filePath) => {
           const importedFile = this.app.vault.getAbstractFileByPath(normalizePath(filePath));
           return importedFile instanceof TFile ? this.app.vault.cachedRead(importedFile) : null;
@@ -573,13 +578,22 @@ export default class loomPlugin extends Plugin {
         resolvePythonImport: async (fromFilePath, moduleName, level) => this.resolvePythonImportVaultPath(fromFilePath, moduleName, level),
       },
     );
+    const capability = getLanguageCapability(block.language, Boolean(externalExtractor));
+    const shouldShowPreview = (this.settings.extractedSourcePreviewMode || "collapsed") !== "hidden";
 
     return {
       block: {
         ...block,
         content: resolved.content,
       },
-      sourceDescription: resolved.description,
+      sourcePreview: shouldShowPreview ? {
+        description: resolved.description,
+        language: block.language,
+        content: resolved.content,
+        capability,
+        expanded: this.settings.extractedSourcePreviewMode === "expanded",
+        showCapabilityMetadata: this.settings.showLanguageCapabilityMetadata ?? true,
+      } : undefined,
     };
   }
 

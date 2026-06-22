@@ -170,6 +170,16 @@ function parseSourceReference(infoTail: string): loomSourceReference | undefined
   const lineRange = lines ? parseLineRange(lines) : null;
   const symbolName = attrs["loom-symbol"] ?? attrs.symbol ?? attrs.fn ?? attrs.function;
   const traceValue = attrs["loom-deps"] ?? attrs.deps ?? attrs.trace;
+  const callExpression = attrs["loom-call"] ?? attrs.call;
+  const callArgs = attrs["loom-args"] ?? attrs.args;
+  const printValue = attrs["loom-print"] ?? attrs.print;
+  const call = callExpression != null || callArgs != null
+    ? {
+      expression: normalizeBooleanAttribute(callExpression) === "true" ? undefined : callExpression,
+      args: callArgs,
+      print: printValue == null ? true : !["0", "false", "no", "off"].includes(printValue.toLowerCase()),
+    }
+    : undefined;
 
   return {
     filePath,
@@ -177,7 +187,12 @@ function parseSourceReference(infoTail: string): loomSourceReference | undefined
     lineEnd: lineRange?.end,
     symbolName,
     traceDependencies: traceValue == null ? true : !["0", "false", "no", "off"].includes(traceValue.toLowerCase()),
+    call,
   };
+}
+
+function normalizeBooleanAttribute(value: string | undefined): string | undefined {
+  return value == null ? undefined : value.trim().toLowerCase();
 }
 
 function parseInfoAttributes(input: string): Record<string, string> {

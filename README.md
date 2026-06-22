@@ -178,6 +178,147 @@ By default, loom also pulls in imports, includes, and referenced definitions tha
 
 Python uses the standard library AST parser for symbol ranges, import analysis, alias handling, local module resolution, and recursive dependency tracing. C and C++ trace top level includes, macros, functions, types, and globals. LLVM IR traces `@symbol` definitions and declarations. Haskell and OCaml trace top level imports and bindings. Other languages use the generic extractor unless a custom extractor command is configured.
 
+### Function call harnesses
+
+If the block is documenting a function, the block body can be treated as input instead of raw harness code. Add `loom-call=true` and loom generates the call around the selected symbol:
+
+````markdown
+```python loom-file="lib/calculus.py" loom-symbol=weighted_root loom-call=true
+25
+```
+````
+
+That runs as if the harness were:
+
+```python
+print(weighted_root(25))
+```
+
+Use `loom-args` when the function needs more than the raw block input:
+
+````markdown
+```python loom-file="lib/calculus.py" loom-symbol=clamp loom-call=true loom-args="{input}, 0, 20"
+25
+```
+````
+
+Use `loom-call` as an expression template when the call shape needs to be custom:
+
+````markdown
+```python loom-file="lib/calculus.py" loom-symbol=weighted_root loom-call="round({symbol}({input}), 2)"
+25
+```
+````
+
+`{input}` expands to the trimmed block body and `{symbol}` expands to the selected symbol. By default loom wraps the expression in the language's print/output harness. Set `loom-print=false` when the expression is already a complete statement or harness.
+
+### Extracted source preview
+
+Runs that use `loom-file` include a collapsed **Extracted source** preview in the output panel. It shows the exact source handed to the runner: imports, dependencies, selected symbol, and generated harness.
+
+The preview header also shows the capability path for that language.
+
+Preview settings live under **General Settings**:
+
+<table>
+  <thead>
+    <tr>
+      <th>Setting</th>
+      <th>Options</th>
+      <th>Effect</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Extracted source preview</td>
+      <td>Collapsed / Expanded / Hidden</td>
+      <td>Controls whether materialized source previews are hidden, shown closed, or opened by default.</td>
+    </tr>
+    <tr>
+      <td>Show capability metadata</td>
+      <td>On / Off</td>
+      <td>Controls the `symbols`, `deps`, and `call` metadata in preview headers.</td>
+    </tr>
+  </tbody>
+</table>
+
+<table>
+  <thead>
+    <tr>
+      <th>Path</th>
+      <th>Symbols</th>
+      <th>Deps</th>
+      <th>Harness</th>
+      <th>Preview</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Python</td>
+      <td>AST</td>
+      <td>AST</td>
+      <td>Built in</td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>JavaScript / TypeScript</td>
+      <td>Top level</td>
+      <td>Top level</td>
+      <td>Built in</td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>C / C++</td>
+      <td>Top level</td>
+      <td>Top level</td>
+      <td>Built in</td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>LLVM IR</td>
+      <td>Top level</td>
+      <td>Top level</td>
+      <td>Raw</td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>Haskell</td>
+      <td>Top level</td>
+      <td>Top level</td>
+      <td>Raw</td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>OCaml</td>
+      <td>Top level</td>
+      <td>Top level</td>
+      <td>Built in</td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>Java</td>
+      <td>Top level</td>
+      <td>Top level</td>
+      <td>Raw</td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>Custom extractor</td>
+      <td>External</td>
+      <td>External</td>
+      <td>External</td>
+      <td>Yes</td>
+    </tr>
+    <tr>
+      <td>Fallback</td>
+      <td>Generic</td>
+      <td>Generic</td>
+      <td>Raw</td>
+      <td>Yes</td>
+    </tr>
+  </tbody>
+</table>
+
 ## Container execution
 
 Notes can opt into container or VM execution with frontmatter:
