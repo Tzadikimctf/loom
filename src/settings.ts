@@ -1,4 +1,4 @@
-import { Notice, PluginSettingTab, Setting, normalizePath } from "obsidian";
+import { App, Modal, Notice, PluginSettingTab, Setting, normalizePath } from "obsidian";
 import type loomPlugin from "./main";
 import type { loomCustomLanguage, loomPluginSettings } from "./types";
 
@@ -34,6 +34,7 @@ export const DEFAULT_SETTINGS: loomPluginSettings = {
   autoRunOnFileOpen: false,
   customLanguages: [],
   pdfExportMode: "both",
+  defaultContainerGroup: "",
 };
 
 export class loomSettingTab extends PluginSettingTab {
@@ -81,7 +82,11 @@ export class loomSettingTab extends PluginSettingTab {
         toggle.setValue(this.loomPlugin.settings.preserveSourceMode).onChange(async (value) => {
           this.loomPlugin.settings.preserveSourceMode = value;
           await this.loomPlugin.saveSettings();
-          void this.loomPlugin.enforceSourceModeForActiveView();
+          if (value) {
+            void this.loomPlugin.enforceSourceModeForActiveView();
+          } else {
+            void this.loomPlugin.disableSourceModeForActiveView();
+          }
         }),
       );
 
@@ -257,29 +262,99 @@ export class loomSettingTab extends PluginSettingTab {
   }
 
   private async renderContainerGroups(containerEl: HTMLElement): Promise<void> {
-    const listEl = containerEl.createDiv({ cls: "loom-container-group-list" });
-    listEl.setText("Scanning container groups...");
+    try {
+      const groups = await this.loomPlugin.getContainerGroupSummaries();
 
-    const groups = await this.loomPlugin.getContainerGroupSummaries();
-    listEl.empty();
+      new Setting(containerEl)
+        .setName("Default containerization group")
+        .setDesc("The container group to run code blocks in by default if the note does not specify one.")
+        .addDropdown((dropdown) => {
+          dropdown.addOption("", "None");
+          for (const group of groups) {
+            dropdown.addOption(group.name, group.name);
+          }
+          dropdown.setValue(this.loomPlugin.settings.defaultContainerGroup || "");
+          dropdown.onChange(async (value) => {
+            this.loomPlugin.settings.defaultContainerGroup = value;
+            await this.loomPlugin.saveSettings();
+          });
+        });
 
-    if (!groups.length) {
-      listEl.createEl("p", {
-        text: "No container groups found in .obsidian/plugins/loom/containers.",
-        cls: "setting-item-description",
-      });
-      return;
-    }
-
-    for (const group of groups) {
-      new Setting(listEl)
-        .setName(group.name)
-        .setDesc(group.status)
+      new Setting(containerEl)
+        .setName("Add new containerization group")
+        .setDesc("Create a new containerization group configuration folder.")
         .addButton((button) =>
-          button.setButtonText("Build / rebuild").onClick(async () => {
-            await this.loomPlugin.buildContainerGroup(group.name);
+          button.setButtonText("+").onClick(() => {
+            new ContainerGroupNameModal(this.app, async (groupName) => {
+              const cleanName = groupName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+              if (!cleanName) {
+                new Notice("Invalid group name.");
+                return;
+              }
+
+              const pluginDir = this.loomPlugin.manifest.dir ?? ".obsidian/plugins/loom";
+              const groupRelativePath = `${pluginDir}/containers/${cleanName}`;
+              const configPath = `${groupRelativePath}/config.json`;
+
+              const adapter = this.app.vault.adapter;
+              if (await adapter.exists(groupRelativePath)) {
+                new Notice("Container group folder already exists.");
+                return;
+              }
+
+              await adapter.mkdir(groupRelativePath);
+              const defaultConfig = {
+                runtime: "docker",
+                image: "ubuntu:latest",
+                languages: {
+                  python: {
+                    command: "python3 {file}",
+                    extension: ".py"
+                  }
+                }
+              };
+              await adapter.write(configPath, JSON.stringify(defaultConfig, null, 2));
+              new Notice(`Container group "${cleanName}" created.`);
+              this.display();
+            }).open();
           }),
         );
+
+      const listEl = containerEl.createDiv({ cls: "loom-container-group-list" });
+      if (!groups.length) {
+        listEl.createEl("p", {
+          text: "No container groups found in .obsidian/plugins/loom/containers.",
+          cls: "setting-item-description",
+        });
+        return;
+      }
+
+      for (const group of groups) {
+        new Setting(listEl)
+          .setName(group.name)
+          .setDesc(group.status)
+          .addButton((button) =>
+            button.setButtonText("Build / rebuild").onClick(async () => {
+              await this.loomPlugin.buildContainerGroup(group.name);
+            }),
+          )
+          .addButton((button) =>
+            button.setButtonText("Edit").onClick(() => {
+              const pluginDir = this.loomPlugin.manifest.dir ?? ".obsidian/plugins/loom";
+              new EditContainerGroupModal(this.loomPlugin, group.name, pluginDir, () => {
+                this.display();
+              }).open();
+            }),
+          );
+      }
+    } catch (error) {
+      containerEl.empty();
+      containerEl.createEl("p", {
+        text: `Error loading container groups: ${error instanceof Error ? error.message : String(error)}`,
+        cls: "loom-settings-error",
+        attr: { style: "color: var(--text-error); font-weight: bold; margin: 1em 0;" }
+      });
+      console.error("loom: failed to render container groups:", error);
     }
   }
 
@@ -317,3 +392,521 @@ export class loomSettingTab extends PluginSettingTab {
 export function showExecutionDisabledNotice(): void {
   new Notice("loom local execution is disabled. Enable it in settings or confirm the execution warning first.");
 }
+
+class ContainerGroupNameModal extends Modal {
+  private name = "";
+
+  constructor(
+    app: App,
+    private readonly onSubmit: (name: string) => Promise<void>,
+  ) {
+    super(app);
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "New Container Group Name" });
+
+    new Setting(contentEl)
+      .setName("Group Name")
+      .setDesc("Use lowercase letters, numbers, hyphens, and underscores.")
+      .addText((text) =>
+        text.onChange((value) => {
+          this.name = value;
+        }),
+      );
+
+    new Setting(contentEl)
+      .addButton((btn) =>
+        btn
+          .setButtonText("Create")
+          .setCta()
+          .onClick(async () => {
+            await this.onSubmit(this.name);
+            this.close();
+          }),
+      );
+  }
+}
+
+class EditContainerGroupModal extends Modal {
+  private activeTab: "general" | "languages" | "dockerfile" | "raw" = "general";
+  private configObj: any = {};
+  private rawJsonText = "";
+  private dockerfileText: string | null = null;
+  private newLanguageName = "";
+  private tabHeaderEl!: HTMLElement;
+  private tabContentEl!: HTMLElement;
+
+  constructor(
+    private readonly loomPlugin: loomPlugin,
+    private readonly groupName: string,
+    private readonly pluginDir: string,
+    private readonly onSave: () => void
+  ) {
+    super(loomPlugin.app);
+  }
+
+  async onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: `Edit Config: ${this.groupName}` });
+
+    const configPath = `${this.pluginDir}/containers/${this.groupName}/config.json`;
+    const dockerfilePath = `${this.pluginDir}/containers/${this.groupName}/Dockerfile`;
+    const adapter = this.app.vault.adapter;
+
+    try {
+      const rawConfig = await adapter.read(configPath);
+      this.configObj = JSON.parse(rawConfig);
+      this.rawJsonText = rawConfig;
+    } catch (e) {
+      new Notice("Could not read configuration file.");
+      this.close();
+      return;
+    }
+
+    try {
+      if (await adapter.exists(dockerfilePath)) {
+        this.dockerfileText = await adapter.read(dockerfilePath);
+      } else {
+        this.dockerfileText = null;
+      }
+    } catch (e) {
+      this.dockerfileText = null;
+    }
+
+    const container = contentEl.createDiv({ cls: "loom-tab-container" });
+
+    // Render Tab Header
+    this.tabHeaderEl = container.createDiv({ cls: "loom-tab-header" });
+    this.renderTabs();
+
+    // Render Tab Content Area
+    this.tabContentEl = container.createDiv({ cls: "loom-tab-content" });
+
+    // Render Actions Footer
+    const actions = contentEl.createDiv({ cls: "loom-modal-actions" });
+    actions.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.close());
+    const saveBtn = actions.createEl("button", { text: "Save", cls: "mod-cta" });
+    saveBtn.addEventListener("click", async () => {
+      await this.saveAndClose();
+    });
+
+    this.renderActiveTab();
+  }
+
+  renderTabs() {
+    this.tabHeaderEl.empty();
+    const tabs: Array<{ id: "general" | "languages" | "dockerfile" | "raw"; label: string }> = [
+      { id: "general", label: "General" },
+      { id: "languages", label: "Languages" },
+      { id: "dockerfile", label: "Dockerfile" },
+      { id: "raw", label: "Raw JSON" },
+    ];
+
+    for (const tab of tabs) {
+      const btn = this.tabHeaderEl.createEl("button", {
+        text: tab.label,
+        cls: "loom-tab-btn" + (this.activeTab === tab.id ? " is-active" : ""),
+      });
+      btn.addEventListener("click", () => {
+        void this.switchTab(tab.id);
+      });
+    }
+  }
+
+  async switchTab(tab: "general" | "languages" | "dockerfile" | "raw") {
+    if (this.activeTab === "raw") {
+      try {
+        this.configObj = JSON.parse(this.rawJsonText);
+      } catch (e) {
+        new Notice("Invalid JSON syntax in Raw JSON tab. Please fix it before switching.");
+        return;
+      }
+    }
+    this.activeTab = tab;
+    this.renderTabs();
+    this.renderActiveTab();
+  }
+
+  renderActiveTab() {
+    this.tabContentEl.empty();
+    if (this.activeTab === "general") {
+      this.renderGeneralTab(this.tabContentEl);
+    } else if (this.activeTab === "languages") {
+      this.renderLanguagesTab(this.tabContentEl);
+    } else if (this.activeTab === "dockerfile") {
+      this.renderDockerfileTab(this.tabContentEl);
+    } else if (this.activeTab === "raw") {
+      this.renderRawTab(this.tabContentEl);
+    }
+  }
+
+  renderGeneralTab(containerEl: HTMLElement) {
+    // Runtime select dropdown
+    new Setting(containerEl)
+      .setName("Runtime")
+      .setDesc("Choose the container/environment manager runtime.")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("docker", "Docker")
+          .addOption("podman", "Podman")
+          .addOption("wsl", "WSL")
+          .addOption("qemu", "QEMU")
+          .addOption("custom", "Custom")
+          .setValue(this.configObj.runtime || "docker")
+          .onChange((value) => {
+            this.configObj.runtime = value;
+            this.renderActiveTab();
+          });
+      });
+
+    // Conditional image/distro name
+    if (
+      this.configObj.runtime === "docker" ||
+      this.configObj.runtime === "podman" ||
+      this.configObj.runtime === "wsl"
+    ) {
+      new Setting(containerEl)
+        .setName(this.configObj.runtime === "wsl" ? "WSL Distro" : "Base Image")
+        .setDesc(
+          this.configObj.runtime === "wsl"
+            ? "Optional. The target WSL distro name (leave empty for default distro)."
+            : "Fallback Docker/Podman image if no Dockerfile is present."
+        )
+        .addText((text) => {
+          text
+            .setValue(this.configObj.image || "")
+            .onChange((val) => {
+              this.configObj.image = val.trim();
+            });
+        });
+    }
+
+    if (this.configObj.runtime === "wsl") {
+      if (!this.configObj.wsl) {
+        this.configObj.wsl = {};
+      }
+      new Setting(containerEl)
+        .setName("Use Interactive Shell")
+        .setDesc("Use interactive login shell flags (-i -l) to ensure ~/.bashrc initialization works (e.g., for NVM).")
+        .addToggle((toggle) => {
+          toggle
+            .setValue(this.configObj.wsl.interactive ?? false)
+            .onChange((val) => {
+              this.configObj.wsl.interactive = val;
+            });
+        });
+    }
+
+    // Conditional QEMU Settings
+    if (this.configObj.runtime === "qemu") {
+      if (!this.configObj.qemu) {
+        this.configObj.qemu = { sshTarget: "", remoteWorkspace: "" };
+      }
+
+      new Setting(containerEl)
+        .setName("SSH Target")
+        .setDesc("SSH target address (e.g. user@hostname or localhost -p 2222).")
+        .addText((text) => {
+          text
+            .setValue(this.configObj.qemu.sshTarget || "")
+            .onChange((val) => {
+              this.configObj.qemu.sshTarget = val.trim();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName("Remote Workspace")
+        .setDesc("Remote folder path to copy code snippets and run commands (e.g., /home/user/workspace).")
+        .addText((text) => {
+          text
+            .setValue(this.configObj.qemu.remoteWorkspace || "")
+            .onChange((val) => {
+              this.configObj.qemu.remoteWorkspace = val.trim();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName("SSH Executable")
+        .setDesc("Optional. Path to SSH client executable (defaults to ssh).")
+        .addText((text) => {
+          text
+            .setValue(this.configObj.qemu.sshExecutable || "")
+            .onChange((val) => {
+              this.configObj.qemu.sshExecutable = val.trim() || undefined;
+            });
+        });
+
+      new Setting(containerEl)
+        .setName("SSH Arguments")
+        .setDesc("Optional. Additional SSH CLI flags.")
+        .addText((text) => {
+          text
+            .setValue(this.configObj.qemu.sshArgs || "")
+            .onChange((val) => {
+              this.configObj.qemu.sshArgs = val.trim() || undefined;
+            });
+        });
+    }
+
+    // Conditional Custom Settings
+    if (this.configObj.runtime === "custom") {
+      if (!this.configObj.custom) {
+        this.configObj.custom = { executable: "" };
+      }
+
+      new Setting(containerEl)
+        .setName("Custom Executable")
+        .setDesc("Path to custom runtime wrapper executable or script.")
+        .addText((text) => {
+          text
+            .setValue(this.configObj.custom.executable || "")
+            .onChange((val) => {
+              this.configObj.custom.executable = val.trim();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName("Custom Arguments")
+        .setDesc("Optional. Command arguments. Use {request} for JSON config path.")
+        .addText((text) => {
+          text
+            .setValue(this.configObj.custom.args || "")
+            .onChange((val) => {
+              this.configObj.custom.args = val.trim() || undefined;
+            });
+        });
+    }
+  }
+
+  renderLanguagesTab(containerEl: HTMLElement) {
+    containerEl.createEl("h3", { text: "Configured Languages" });
+
+    if (!this.configObj.languages) {
+      this.configObj.languages = {};
+    }
+
+    const langsListEl = containerEl.createDiv({ cls: "loom-languages-list" });
+    const languages = Object.entries(this.configObj.languages as Record<string, { command?: string; extension?: string; useDefault?: boolean }>);
+
+    if (languages.length === 0) {
+      langsListEl.createEl("p", { text: "No languages configured for this group.", cls: "setting-item-description" });
+    } else {
+      for (const [langName, langConfig] of languages) {
+        const card = langsListEl.createDiv({ cls: "loom-language-card" });
+        card.createEl("strong", { text: langName, attr: { style: "display: block; margin-bottom: 0.5rem; font-size: 1.1em;" } });
+
+        const isDefault = (langConfig as any).useDefault === true;
+
+        new Setting(card)
+          .setName("Use default configuration")
+          .setDesc("If checked, Loom will run this language using its built-in commands/extensions.")
+          .addToggle((toggle) => {
+            toggle
+              .setValue(isDefault)
+              .onChange((val) => {
+                if (val) {
+                  (langConfig as any).useDefault = true;
+                  delete langConfig.command;
+                  delete langConfig.extension;
+                } else {
+                  delete (langConfig as any).useDefault;
+                  const defaults = this.loomPlugin.containerRunner.getDefaultLanguageConfig(langName, this.loomPlugin.settings);
+                  langConfig.command = defaults?.command || "";
+                  langConfig.extension = defaults?.extension || "";
+                }
+                this.renderActiveTab();
+              });
+          });
+
+        new Setting(card)
+          .setName("Command")
+          .setDesc("Execution command. Use {file} for the code snippet filename.")
+          .addText((text) => {
+            const defaults = this.loomPlugin.containerRunner.getDefaultLanguageConfig(langName, this.loomPlugin.settings);
+            text
+              .setPlaceholder(defaults?.command || "")
+              .setValue(langConfig.command || "")
+              .setDisabled(isDefault)
+              .onChange((val) => {
+                langConfig.command = val.trim();
+              });
+          });
+
+        new Setting(card)
+          .setName("Extension")
+          .setDesc("Source file extension (e.g. .py, .js).")
+          .addText((text) => {
+            const defaults = this.loomPlugin.containerRunner.getDefaultLanguageConfig(langName, this.loomPlugin.settings);
+            text
+              .setPlaceholder(defaults?.extension || "")
+              .setValue(langConfig.extension || "")
+              .setDisabled(isDefault)
+              .onChange((val) => {
+                langConfig.extension = val.trim();
+              });
+          });
+
+        new Setting(card)
+          .addButton((btn) => {
+            btn
+              .setButtonText("Remove Language")
+              .setWarning()
+              .onClick(() => {
+                delete this.configObj.languages[langName];
+                this.renderActiveTab();
+              });
+          });
+      }
+    }
+
+    // Add Language Section
+    containerEl.createEl("h3", { text: "Add Language Mapping", attr: { style: "margin-top: 1.5rem;" } });
+    new Setting(containerEl)
+      .setName("Language ID")
+      .setDesc("e.g. python, javascript, node, sh")
+      .addText((text) => {
+        text.setValue(this.newLanguageName).onChange((val) => {
+          this.newLanguageName = val.trim().toLowerCase();
+        });
+      })
+      .addButton((btn) => {
+        btn.setButtonText("+ Add").setCta().onClick(() => {
+          if (!this.newLanguageName) {
+            new Notice("Please enter a language name.");
+            return;
+          }
+          if (this.configObj.languages[this.newLanguageName]) {
+            new Notice("Language already configured.");
+            return;
+          }
+          this.configObj.languages[this.newLanguageName] = {
+            command: `${this.newLanguageName} {file}`,
+            extension: `.${this.newLanguageName}`,
+          };
+          this.newLanguageName = "";
+          this.renderActiveTab();
+        });
+      });
+  }
+
+  renderDockerfileTab(containerEl: HTMLElement) {
+    if (this.configObj.runtime !== "docker" && this.configObj.runtime !== "podman") {
+      containerEl.createEl("p", {
+        text: `Dockerfile editing is only available for Docker and Podman runtimes. Currently using: ${this.configObj.runtime}`,
+        cls: "setting-item-description",
+      });
+      return;
+    }
+
+    if (this.dockerfileText === null) {
+      containerEl.createEl("p", {
+        text: "No Dockerfile exists in this container group directory.",
+        cls: "setting-item-description",
+      });
+
+      new Setting(containerEl)
+        .addButton((btn) => {
+          btn
+            .setButtonText("Create Dockerfile")
+            .setCta()
+            .onClick(() => {
+              this.dockerfileText = [
+                "FROM ubuntu:latest",
+                "",
+                "# Install packages",
+                "RUN apt-get update && apt-get install -y \\",
+                "    python3 \\",
+                "    nodejs \\",
+                "    && rm -rf /var/lib/apt/lists/*",
+                "",
+              ].join("\n");
+              this.renderActiveTab();
+            });
+        });
+    } else {
+      new Setting(containerEl)
+        .setName("Dockerfile Content")
+        .setDesc("Define the build steps for your environment container.")
+        .addTextArea((text) => {
+          text.inputEl.rows = 15;
+          text.inputEl.style.fontFamily = "monospace";
+          text.inputEl.style.width = "100%";
+          text.setValue(this.dockerfileText || "");
+          text.onChange((val) => {
+            this.dockerfileText = val;
+          });
+        });
+    }
+  }
+
+  renderRawTab(containerEl: HTMLElement) {
+    this.rawJsonText = JSON.stringify(this.configObj, null, 2);
+    new Setting(containerEl)
+      .setName("Configuration JSON")
+      .addTextArea((text) => {
+        text.inputEl.rows = 15;
+        text.inputEl.style.fontFamily = "monospace";
+        text.inputEl.style.width = "100%";
+        text.setValue(this.rawJsonText);
+        text.onChange((val) => {
+          this.rawJsonText = val;
+        });
+      });
+  }
+
+  async saveAndClose() {
+    // If the active tab is raw JSON, parse it first to ensure we capture edits
+    if (this.activeTab === "raw") {
+      try {
+        this.configObj = JSON.parse(this.rawJsonText);
+      } catch (e) {
+        new Notice("Invalid JSON syntax in Raw JSON tab. Please fix it before saving.");
+        return;
+      }
+    }
+
+    // Basic Validation
+    if (!this.configObj.runtime) {
+      new Notice("Runtime is required.");
+      return;
+    }
+    if (this.configObj.runtime === "qemu" && (!this.configObj.qemu?.sshTarget || !this.configObj.qemu?.remoteWorkspace)) {
+      new Notice("QEMU runtime requires SSH Target and Remote Workspace.");
+      return;
+    }
+    if (this.configObj.runtime === "custom" && !this.configObj.custom?.executable) {
+      new Notice("Custom runtime requires Custom Executable.");
+      return;
+    }
+
+    const adapter = this.app.vault.adapter;
+    const configPath = `${this.pluginDir}/containers/${this.groupName}/config.json`;
+    const dockerfilePath = `${this.pluginDir}/containers/${this.groupName}/Dockerfile`;
+
+    try {
+      // Save config.json
+      const configStr = JSON.stringify(this.configObj, null, 2);
+      await adapter.write(configPath, configStr);
+
+      // Save Dockerfile
+      if (this.configObj.runtime === "docker" || this.configObj.runtime === "podman") {
+        if (this.dockerfileText !== null) {
+          await adapter.write(dockerfilePath, this.dockerfileText);
+        }
+      }
+
+      new Notice("Container group configurations saved.");
+      this.onSave();
+      this.close();
+    } catch (error) {
+      new Notice(`Save failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+
+

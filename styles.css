@@ -291,3 +291,54 @@
     display: none !important;
   }
 }
+
+/* Tabbed Interface for Container Group Editor */
+.loom-tab-container {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.loom-tab-header {
+  display: flex;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding-bottom: 0.5rem;
+  overflow-x: auto;
+}
+
+.loom-tab-btn {
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-weight: 500;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.loom-tab-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.loom-tab-btn.is-active {
+  background: var(--background-modifier-active-hover);
+  color: var(--text-accent);
+  font-weight: 600;
+}
+
+.loom-tab-content {
+  min-height: 250px;
+}
+
+.loom-language-card {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+  background: var(--background-primary-alt);
+}
+

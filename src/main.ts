@@ -6,6 +6,7 @@ import {
   Plugin,
   TFile,
   WorkspaceLeaf,
+  normalizePath,
 } from "obsidian";
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, ViewUpdate, WidgetType } from "@codemirror/view";
@@ -24,6 +25,7 @@ import { PythonRunner } from "./runners/python";
 import { ProofRunner } from "./runners/proof";
 import { loomRunnerRegistry } from "./runners/registry";
 import { DEFAULT_SETTINGS, loomSettingTab, showExecutionDisabledNotice } from "./settings";
+import { resolveReferencedSource } from "./sourceExtract";
 import { createCodeBlockToolbar } from "./ui/codeBlockToolbar";
 import { createOutputPanel, createRunningPanel } from "./ui/outputPanel";
 import type { loomCodeBlock, loomPluginSettings, loomStoredOutput } from "./types";
@@ -99,15 +101,18 @@ class loomToolbarRenderChild extends MarkdownRenderChild {
 }
 
 class loomToolbarWidget extends WidgetType {
+  private readonly isRunning: boolean;
+
   constructor(
     private readonly plugin: loomPlugin,
     private readonly block: loomCodeBlock,
   ) {
     super();
+    this.isRunning = plugin.isBlockRunning(block.id);
   }
 
   eq(other: loomToolbarWidget): boolean {
-    return other.block.id === this.block.id && other.plugin.isBlockRunning(this.block.id) === this.plugin.isBlockRunning(this.block.id);
+    return other.block.id === this.block.id && other.isRunning === this.isRunning;
   }
 
   toDOM(): HTMLElement {
@@ -148,7 +153,8 @@ export default class loomPlugin extends Plugin {
     new ProofRunner(),
     new CustomLanguageRunner(),
   ]);
-  private readonly containerRunner = new loomContainerRunner(this.app, this.manifest.dir ?? ".obsidian/plugins/loom");
+  // Exposed as public and readonly so the settings panel and modals can access container configurations and default language mapping helpers.
+  public readonly containerRunner = new loomContainerRunner(this.app, this.manifest.dir ?? ".obsidian/plugins/loom");
   private readonly registeredCodeBlockAliases = new Set<string>();
   private readonly outputs = new Map<string, loomStoredOutput>();
   private readonly running = new Map<string, AbortController>();
@@ -380,7 +386,7 @@ export default class loomPlugin extends Plugin {
   async runAllBlocksInFile(file: TFile): Promise<void> {
     const source = await this.app.vault.cachedRead(file);
     const blocks = parseMarkdownCodeBlocks(file.path, source, this.settings);
-    const containerGroup = this.containerRunner.getContainerGroupName(file);
+    const containerGroup = this.containerRunner.getContainerGroupName(file) || this.settings.defaultContainerGroup;
     const supportedBlocks = containerGroup ? blocks : blocks.filter((block) => this.registry.getRunnerForBlock(block, this.settings));
 
     if (!supportedBlocks.length) {
@@ -417,7 +423,7 @@ export default class loomPlugin extends Plugin {
     }
 
     const workingDirectory = this.resolveWorkingDirectory(file);
-    const containerGroup = this.containerRunner.getContainerGroupName(file);
+    const containerGroup = this.containerRunner.getContainerGroupName(file) || this.settings.defaultContainerGroup;
     const runner = containerGroup ? null : this.registry.getRunnerForBlock(block, this.settings);
     if (!runner) {
       if (!containerGroup) {
@@ -438,9 +444,10 @@ export default class loomPlugin extends Plugin {
     this.updateStatusBar();
 
     try {
+      const resolvedBlock = await this.resolveExecutableBlock(file, block);
       const result = containerGroup
-        ? await this.containerRunner.run(block, runContext, this.settings, containerGroup)
-        : await runner!.run(block, runContext, this.settings);
+        ? await this.containerRunner.run(resolvedBlock.block, runContext, this.settings, containerGroup)
+        : await runner!.run(resolvedBlock.block, runContext, this.settings);
 
       if (result.timedOut) {
         result.stderr = result.stderr || `Execution timed out after ${this.settings.defaultTimeoutMs} ms.`;
@@ -448,6 +455,11 @@ export default class loomPlugin extends Plugin {
         result.stderr = result.stderr || "Execution cancelled.";
       } else if (!result.success && !result.stderr.trim()) {
         result.stderr = "Process exited unsuccessfully.";
+      }
+
+      if (resolvedBlock.sourceDescription) {
+        const sourceNotice = `Ran extracted source from ${resolvedBlock.sourceDescription}.`;
+        result.warning = result.warning ? `${sourceNotice}\n${result.warning}` : sourceNotice;
       }
 
       this.outputs.set(block.id, {
@@ -532,6 +544,46 @@ export default class loomPlugin extends Plugin {
     const fileFolder = dirname(file.path);
     const resolved = fileFolder === "." ? adapterBasePath : `${adapterBasePath}/${fileFolder}`;
     return resolved || process.cwd();
+  }
+
+  private async resolveExecutableBlock(file: TFile, block: loomCodeBlock): Promise<{ block: loomCodeBlock; sourceDescription?: string }> {
+    if (!block.sourceReference) {
+      return { block };
+    }
+
+    const referencePath = this.resolveReferencedVaultPath(file, block.sourceReference.filePath);
+    const sourceFile = this.app.vault.getAbstractFileByPath(referencePath);
+    if (!(sourceFile instanceof TFile)) {
+      throw new Error(`Referenced source file not found: ${referencePath}`);
+    }
+
+    const resolved = resolveReferencedSource(
+      await this.app.vault.cachedRead(sourceFile),
+      { ...block.sourceReference, filePath: referencePath },
+      block.language,
+      block.content,
+    );
+
+    return {
+      block: {
+        ...block,
+        content: resolved.content,
+      },
+      sourceDescription: resolved.description,
+    };
+  }
+
+  private resolveReferencedVaultPath(file: TFile, referencePath: string): string {
+    const trimmed = referencePath.trim();
+    if (!trimmed) {
+      return trimmed;
+    }
+    if (trimmed.startsWith("/")) {
+      return normalizePath(trimmed.slice(1));
+    }
+
+    const baseDir = dirname(file.path);
+    return normalizePath(baseDir === "." ? trimmed : `${baseDir}/${trimmed}`);
   }
 
   async getContainerGroupSummaries(): Promise<Array<{ name: string; status: string }>> {
@@ -634,6 +686,25 @@ export default class loomPlugin extends Plugin {
     }
 
     await this.enforceSourceModeForLeaf(view.leaf);
+  }
+
+  async disableSourceModeForActiveView(): Promise<void> {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view) {
+      return;
+    }
+
+    const leaf = view.leaf;
+    const viewState = leaf.getViewState();
+    const state = { ...(viewState.state ?? {}) } as Record<string, unknown>;
+    
+    if (state.mode === "source" && state.source === true) {
+      state.source = false;
+      await leaf.setViewState({
+        ...viewState,
+        state,
+      });
+    }
   }
 
   private async enforceSourceModeForLeaf(leaf: WorkspaceLeaf): Promise<void> {

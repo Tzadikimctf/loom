@@ -6,10 +6,12 @@ import os from "os";
 
 const prod = (process.argv[2] === "production");
 const pluginName = "loom";
-const explicitDeployDirs = (process.env.LOOM_PLUGIN_DIRS ?? "")
-  .split(path.delimiter)
-  .map((value) => value.trim())
-  .filter(Boolean);
+const explicitDeployDirs = [
+  ...(process.env.LOOM_PLUGIN_DIRS ?? "")
+    .split(path.delimiter)
+    .map((value) => value.trim())
+    .filter(Boolean)
+];
 
 await esbuild.build({
   entryPoints: ["src/main.ts"],
