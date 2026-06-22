@@ -6,9 +6,7 @@ import os from "os";
 
 const prod = (process.argv[2] === "production");
 const pluginName = "loom";
-// Always deploy to both workspace vaults if they exist
 const explicitDeployDirs = [
-  path.resolve("../../.obsidian/plugins/loom"),
   ...(process.env.LOOM_PLUGIN_DIRS ?? "")
     .split(path.delimiter)
     .map((value) => value.trim())

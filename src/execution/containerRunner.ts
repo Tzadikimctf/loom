@@ -519,7 +519,7 @@ export class loomContainerRunner {
 
       languages[language] = {
         command: typeof languageConfig.command === "string" ? languageConfig.command : undefined,
-        extension: typeof languageConfig.extension === "string" ? languageConfig.extension : undefined,
+        extension: typeof languageConfig.extension === "string" ? languageConfig.extension : useDefault ? undefined : `.${language}`,
         useDefault: useDefault || undefined,
       };
     }
@@ -1097,13 +1097,77 @@ export class loomContainerRunner {
         };
       case "ocaml":
       case "ml":
+        if (settings.ocamlMode === "dune") {
+          return {
+            command: `${settings.ocamlExecutable.trim() || "dune"} exec -- ocaml {file}`,
+            extension: ".ml",
+          };
+        }
+        if (settings.ocamlMode === "ocamlc") {
+          return {
+            command: shellCommand(`${settings.ocamlExecutable.trim() || "ocamlc"} -o /tmp/loom-ocaml "$1" && /tmp/loom-ocaml`),
+            extension: ".ml",
+          };
+        }
         return {
           command: `${settings.ocamlExecutable.trim() || "ocaml"} {file}`,
           extension: ".ml",
         };
+      case "c":
+        return {
+          command: shellCommand(`${settings.cExecutable.trim() || "gcc"} "$1" -o /tmp/loom-c && /tmp/loom-c`),
+          extension: ".c",
+        };
+      case "cpp":
+      case "c++":
+        return {
+          command: shellCommand(`${settings.cppExecutable.trim() || "g++"} "$1" -o /tmp/loom-cpp && /tmp/loom-cpp`),
+          extension: ".cpp",
+        };
+      case "rust":
+      case "rs":
+        return {
+          command: shellCommand(`${settings.rustExecutable.trim() || "rustc"} "$1" -o /tmp/loom-rust && /tmp/loom-rust`),
+          extension: ".rs",
+        };
+      case "java": {
+        const compiler = settings.javaCompilerExecutable.trim() || "javac";
+        return {
+          command: shellCommand(`tmp=/tmp/loom-java-$$ && mkdir -p "$tmp" && cp "$1" "$tmp/Main.java" && ${compiler} "$tmp/Main.java" && ${settings.javaExecutable.trim() || "java"} -cp "$tmp" Main`),
+          extension: ".java",
+        };
+      }
+      case "llvm-ir":
+      case "llvm":
+      case "ll":
+        return {
+          command: `${settings.llvmInterpreterExecutable.trim() || "lli"} {file}`,
+          extension: ".ll",
+        };
+      case "lean":
+        return {
+          command: `${settings.leanExecutable.trim() || "lean"} {file}`,
+          extension: ".lean",
+        };
+      case "coq":
+        return {
+          command: `${settings.coqExecutable.trim() || "coqc"} -q {file}`,
+          extension: ".v",
+        };
+      case "smtlib":
+      case "smt":
+      case "smt-lib":
+        return {
+          command: `${settings.smtExecutable.trim() || "z3"} {file}`,
+          extension: ".smt2",
+        };
     }
     return null;
   }
+}
+
+function shellCommand(command: string): string {
+  return `sh -lc ${quoteCommandArg(command)} sh {file}`;
 }
 
 function normalizeExtension(extension: string): string {
@@ -1180,5 +1244,9 @@ function runtimeLabel(runtime: loomContainerRuntime): string {
 }
 
 function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function quoteCommandArg(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
