@@ -11,32 +11,41 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
-        container: [none, docker-test, podman-test]
+        include:
+          - profile: minimal
+            container: none
+          - profile: systems
+            container: none
+          - profile: proofs
+            container: none
+          - profile: ebpf
+            container: none
+          - profile: full
+            container: none
+          - profile: minimal
+            container: docker-test
+          - profile: systems
+            container: docker-test
+          - profile: minimal
+            container: podman-test
+          - profile: systems
+            container: podman-test
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
       - uses: browser-actions/setup-chrome@v1
         id: setup-chrome
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang llvm bpftrace z3 podman
-
-      - name: Fetch vault branch
-        run: git fetch origin vault:vault
-
-      - name: Install npm dependencies
-        run: npm ci --legacy-peer-deps
-
-      - name: Configure container environment
+      - run: sudo apt-get update && sudo apt-get install -y clang llvm bpftrace z3 podman
+      - run: git fetch origin vault:vault
+      - name: Configure container test vault
         if: matrix.container != 'none'
         run: |
           git checkout vault
@@ -52,53 +61,47 @@ jobs:
               "mode": "default"
             },
             "languages": {
-              "shell": { "useDefault": true },
-              "sh": { "useDefault": true },
-              "python": { "useDefault": true },
-              "c": { "useDefault": true },
-              "cpp": { "useDefault": true }
+              "shell": {
+                "useDefault": true
+              },
+              "sh": {
+                "useDefault": true
+              },
+              "python": {
+                "useDefault": true
+              },
+              "c": {
+                "useDefault": true
+              },
+              "cpp": {
+                "useDefault": true
+              }
             }
           }
           JSON
           printf -- "---\nloom-execution: ${{ matrix.container }}\n---\n\n" | cat - "Smoke Suite.md" > temp_suite.md
           mv temp_suite.md "Smoke Suite.md"
-          
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add "Smoke Suite.md" "${group_dir}/config.json"
           git commit -m "Configure container smoke fixture"
           git checkout -f -
-
-      - name: Pull container image
+      - run: npm ci --legacy-peer-deps
+      - name: Pull container smoke image
         if: matrix.container != 'none'
         run: |
           runtime="${{ matrix.container }}"
           sudo "${runtime%-test}" pull docker.io/library/python:3.12-bookworm
-
-      - name: Run smoke tests
+      - run: npm run smoke -- --profile ${{ matrix.profile }} --require-pdf --require-all
+        if: matrix.profile != 'ebpf' && matrix.profile != 'full' && matrix.container == 'none'
         env:
           LOOM_CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
-        run: |
-          if [ "${{ matrix.container }}" = "none" ]; then
-            # Run non-sudo native profiles
-            npm run smoke -- --profile minimal --require-pdf --require-all
-            npm run smoke -- --profile systems --require-pdf --require-all
-            npm run smoke -- --profile proofs --require-pdf --require-all
-            
-            # Run sudo native profiles
-            sudo --preserve-env=PATH,LOOM_CHROME_PATH npm run smoke -- --profile ebpf --require-pdf --require-all
-            sudo --preserve-env=PATH,LOOM_CHROME_PATH npm run smoke -- --profile full --require-pdf --require-all
-          else
-            # Run all profiles sequentially in the target container environment
-            sudo --preserve-env=PATH,LOOM_CHROME_PATH npm run smoke -- --profile minimal --require-pdf --require-all
-            sudo --preserve-env=PATH,LOOM_CHROME_PATH npm run smoke -- --profile systems --require-pdf --require-all
-            sudo --preserve-env=PATH,LOOM_CHROME_PATH npm run smoke -- --profile proofs --require-pdf --require-all
-            sudo --preserve-env=PATH,LOOM_CHROME_PATH npm run smoke -- --profile ebpf --require-pdf --require-all
-            sudo --preserve-env=PATH,LOOM_CHROME_PATH npm run smoke -- --profile full --require-pdf --require-all
-          fi
-
+      - run: sudo --preserve-env=PATH,LOOM_CHROME_PATH npm run smoke -- --profile ${{ matrix.profile }} --require-pdf --require-all
+        if: matrix.profile == 'ebpf' || matrix.profile == 'full' || matrix.container != 'none'
+        env:
+          LOOM_CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: loom-smoke-${{ matrix.container }}
-          path: .loom/artifacts/smoke/
+          name: loom-smoke-${{ matrix.profile }}-${{ matrix.container }}
+          path: .loom/artifacts/smoke/${{ matrix.profile }}
