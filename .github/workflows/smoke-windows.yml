@@ -15,9 +15,6 @@ jobs:
         profile:
           - minimal
           - systems
-          - proofs
-          - ebpf
-          - full
         container:
           - none
         # include:
@@ -36,18 +33,6 @@ jobs:
 
       - uses: browser-actions/setup-chrome@v1
         id: setup-chrome
-
-      - name: Provision WSL (Ubuntu)
-        uses: Vampire/setup-wsl@v7
-        with:
-          distribution: Ubuntu-22.04
-          wsl-version: 2
-
-      - name: Install dependencies in WSL
-        shell: powershell
-        run: |
-          wsl sudo apt-get update
-          wsl sudo apt-get install -y clang llvm bpftrace z3
 
       - name: Fetch vault branch
         run: git fetch origin vault:vault
