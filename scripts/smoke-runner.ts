@@ -21,6 +21,7 @@ import { LlvmRunner } from "../src/runners/llvm";
 import { ProofRunner } from "../src/runners/proof";
 import { CustomLanguageRunner } from "../src/runners/custom";
 import { loomRunnerRegistry } from "../src/runners/registry";
+import { loomContainerRunner } from "../src/execution/containerRunner";
 import type { loomCodeBlock, loomPluginSettings, loomResolvedExecutionContext, loomRunResult, loomSourcePreview } from "../src/types";
 
 type SmokeProfile = "minimal" | "systems" | "proofs" | "ebpf" | "full";
@@ -67,6 +68,16 @@ const registry = new loomRunnerRegistry([
   new ProofRunner(),
   new CustomLanguageRunner(),
 ]);
+const containerRunner = new loomContainerRunner({
+  vault: {
+    adapter: {
+      basePath: vaultDir,
+    },
+  },
+  metadataCache: {
+    getFileCache: () => ({ frontmatter: {} }),
+  },
+} as never, ".obsidian/plugins/loom");
 const notes = await readNotes(vaultDir);
 const results: SmokeBlockResult[] = [];
 
@@ -115,31 +126,6 @@ async function runBlock(note: NoteFile, block: loomCodeBlock): Promise<SmokeBloc
   }
 
   const context = resolveCliExecutionContext(note, block, settings);
-  if (context.containerGroup) {
-    return {
-      profile,
-      note: note.path,
-      ordinal: block.ordinal,
-      language: block.language,
-      status: "failed",
-      name,
-      reason: `container group ${context.containerGroup} cannot run in the headless smoke runner`,
-    };
-  }
-
-  const runner = registry.getRunnerForBlock(block, settings);
-  if (!runner) {
-    return {
-      profile,
-      note: note.path,
-      ordinal: block.ordinal,
-      language: block.language,
-      status: directives.has("skip-missing") ? "skipped" : "failed",
-      name,
-      reason: "no configured runner",
-    };
-  }
-
   const controller = new AbortController();
   let sourcePreview: loomSourcePreview | undefined;
   let executableBlock = block;
@@ -159,20 +145,44 @@ async function runBlock(note: NoteFile, block: loomCodeBlock): Promise<SmokeBloc
     };
   }
 
-  const result = await runner.run(executableBlock, {
+  const runContext = {
     file: { path: note.path } as never,
     workingDirectory: context.workingDirectory,
     timeoutMs: context.timeoutMs,
     signal: controller.signal,
     stdin: await resolveBlockStdin(note, block),
-  }, settings);
+  };
+
+  if (context.containerGroup) {
+    const result = await containerRunner.run(executableBlock, runContext, settings, context.containerGroup);
+    if (sourcePreview) {
+      const sourceNotice = `Ran extracted source from ${sourcePreview.description}.`;
+      result.warning = result.warning ? `${sourceNotice}\n${result.warning}` : sourceNotice;
+    }
+    return classifyResult(note, executableBlock, name, directives, `Execution group ${context.containerGroup}`, result, sourcePreview);
+  }
+
+  const runner = registry.getRunnerForBlock(executableBlock, settings);
+  if (!runner) {
+    return {
+      profile,
+      note: note.path,
+      ordinal: block.ordinal,
+      language: block.language,
+      status: directives.has("skip-missing") ? "skipped" : "failed",
+      name,
+      reason: "no configured runner",
+    };
+  }
+
+  const result = await runner.run(executableBlock, runContext, settings);
 
   if (sourcePreview) {
     const sourceNotice = `Ran extracted source from ${sourcePreview.description}.`;
     result.warning = result.warning ? `${sourceNotice}\n${result.warning}` : sourceNotice;
   }
 
-  return classifyResult(note, block, name, directives, runner.displayName, result, sourcePreview);
+  return classifyResult(note, executableBlock, name, directives, runner.displayName, result, sourcePreview);
 }
 
 function classifyResult(
@@ -330,7 +340,7 @@ function smokeProfileConfig(selectedProfile: SmokeProfile): Pick<loomPluginSetti
 }
 
 function resolveCliExecutionContext(note: NoteFile, block: loomCodeBlock, pluginSettings: loomPluginSettings): loomResolvedExecutionContext {
-  const noteContainer = note.frontmatter["loom-container"];
+  const noteContainer = note.frontmatter["loom-execution"] ?? note.frontmatter["loom-container"];
   const noteCwd = note.frontmatter["loom-cwd"] ?? note.frontmatter["loom-working-directory"];
   const noteTimeout = parsePositiveInteger(note.frontmatter["loom-timeout"]);
   const blockCwd = block.executionContext.workingDirectory;

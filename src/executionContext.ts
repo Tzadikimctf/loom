@@ -77,7 +77,7 @@ function readNoteExecutionContext(app: App, file: TFile): NoteExecutionContext {
     return {};
   }
 
-  const container = frontmatter["loom-container"];
+  const container = frontmatter["loom-execution"] ?? frontmatter["loom-container"];
   const workingDirectory = frontmatter["loom-cwd"] ?? frontmatter["loom-working-directory"];
   const timeout = frontmatter["loom-timeout"];
 

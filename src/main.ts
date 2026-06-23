@@ -7,9 +7,11 @@ import {
   TFile,
   WorkspaceLeaf,
   normalizePath,
+  type DataAdapter,
 } from "obsidian";
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, ViewUpdate, WidgetType } from "@codemirror/view";
+import JSZip from "jszip";
 import { dirname } from "path";
 import { loomContainerRunner } from "./execution/containerRunner";
 import { resolveExecutionContext } from "./executionContext";
@@ -39,6 +41,7 @@ import type { loomCodeBlock, loomExternalLanguage, loomExternalLanguagePack, loo
 
 const loomRefreshEffect = StateEffect.define<void>();
 const EXTERNAL_LANGUAGE_PACK_DIR = "language-packs";
+const LANGUAGE_PACK_MANIFEST_NAMES = new Set(["loom-language-pack.json", "language-pack.json", "manifest.json"]);
 type loomOutputFileMode = "replace" | "append";
 type loomOutputFileFormat = "text" | "json";
 type loomOutputFileStream = "stdout" | "stderr" | "warning" | "metadata";
@@ -48,6 +51,11 @@ interface loomOutputFileTarget {
   mode: loomOutputFileMode;
   format: loomOutputFileFormat;
   streams: loomOutputFileStream[];
+}
+
+interface loomArchiveEntry {
+  path: string;
+  data: Uint8Array;
 }
 
 class ExecutionConsentModal extends Modal {
@@ -314,9 +322,7 @@ export default class loomPlugin extends Plugin {
         return;
       }
 
-      const listed = await adapter.list(packDir);
-      const files = listed.files
-        .filter((path) => path.toLowerCase().endsWith(".json"))
+      const files = (await listLanguagePackManifestPaths(adapter, packDir))
         .sort((a, b) => a.localeCompare(b));
 
       for (const filePath of files) {
@@ -346,6 +352,45 @@ export default class loomPlugin extends Plugin {
       const suffix = failures ? `, ${failures} failed` : "";
       new Notice(`Loaded ${packs.length} external language pack${packs.length === 1 ? "" : "s"}${suffix}`);
     }
+  }
+
+  async importExternalLanguageBundle(file: File): Promise<{ packId: string; fileCount: number }> {
+    const entries = normalizeBundleEntries(await readLanguageBundleArchive(file), file.name);
+    if (!entries.length) {
+      throw new Error("Language bundle archive did not contain any importable files.");
+    }
+
+    const manifestEntry = findBundleManifest(entries);
+    if (!manifestEntry) {
+      throw new Error("Language bundle archive must include loom-language-pack.json, language-pack.json, manifest.json, or a valid root JSON pack manifest.");
+    }
+
+    const manifest = readBundleManifest(manifestEntry);
+    if (!manifest || !Array.isArray(manifest.languages)) {
+      throw new Error("Language bundle manifest must be valid JSON with a languages array.");
+    }
+
+    const packId = normalizeManifestId(readString(manifest.id)) || normalizeManifestId(file.name.replace(/\.(tar\.gz|tgz|zip|tar)$/i, ""));
+    if (!packId) {
+      throw new Error("Language bundle manifest is missing a package id.");
+    }
+
+    const adapter = this.app.vault.adapter;
+    const packDir = normalizePath(`${this.manifest.dir ?? ".obsidian/plugins/loom"}/${EXTERNAL_LANGUAGE_PACK_DIR}`);
+    const bundleDir = normalizePath(`${packDir}/${packId}`);
+    await this.ensureVaultFolder(bundleDir);
+
+    for (const entry of entries) {
+      const targetPath = normalizePath(`${bundleDir}/${entry.path}`);
+      if (!isPathWithin(targetPath, bundleDir)) {
+        throw new Error(`Invalid bundle path: ${entry.path}`);
+      }
+      await this.ensureVaultParentFolder(targetPath);
+      await adapter.writeBinary(targetPath, toArrayBuffer(entry.data));
+    }
+
+    await this.loadExternalLanguagePacks();
+    return { packId, fileCount: entries.length };
   }
 
   async saveSettings(): Promise<void> {
@@ -576,7 +621,7 @@ export default class loomPlugin extends Plugin {
         await this.writeManagedOutputBlock(file, block, result);
       }
 
-      const runnerName = containerGroup ? `container ${containerGroup}` : runner!.displayName;
+      const runnerName = containerGroup ? `execution group ${containerGroup}` : runner!.displayName;
       new Notice(result.success ? `loom ran ${runnerName} block.` : `loom run failed for ${runnerName}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -587,7 +632,7 @@ export default class loomPlugin extends Plugin {
         visible: true,
         result: {
           runnerId: containerGroup ? `container:${containerGroup}` : runner?.id ?? "unknown",
-          runnerName: containerGroup ? `Container ${containerGroup}` : runner?.displayName ?? "Unknown",
+          runnerName: containerGroup ? `Execution group ${containerGroup}` : runner?.displayName ?? "Unknown",
           startedAt: new Date().toISOString(),
           finishedAt: new Date().toISOString(),
           durationMs: 0,
@@ -1000,7 +1045,7 @@ export default class loomPlugin extends Plugin {
 
   private formatExecutionContextNotice(context: loomResolvedExecutionContext): string {
     const pieces = [
-      `container=${context.containerGroup ?? "native"} (${context.source.container})`,
+      `execution=${context.containerGroup ?? "native"} (${context.source.container})`,
       `cwd=${context.workingDirectory} (${context.source.workingDirectory})`,
       `timeout=${context.timeoutMs}ms (${context.source.timeout})`,
     ];
@@ -1160,6 +1205,10 @@ export default class loomPlugin extends Plugin {
       return;
     }
 
+    await this.ensureVaultFolder(folder);
+  }
+
+  private async ensureVaultFolder(folder: string): Promise<void> {
     let current = "";
     for (const part of folder.split("/").filter(Boolean)) {
       current = current ? `${current}/${part}` : part;
@@ -1343,6 +1392,200 @@ export default class loomPlugin extends Plugin {
 
 function decodeEscapedAttribute(value: string): string {
   return value.replace(/\\n/g, "\n").replace(/\\t/g, "\t");
+}
+
+async function listLanguagePackManifestPaths(adapter: DataAdapter, root: string): Promise<string[]> {
+  const manifests: string[] = [];
+
+  async function walk(folder: string, depth: number): Promise<void> {
+    const listed = await adapter.list(folder);
+    for (const file of listed.files) {
+      const lower = file.toLowerCase();
+      if (!lower.endsWith(".json")) {
+        continue;
+      }
+
+      const relative = normalizePath(file.slice(root.length + 1));
+      const nested = relative.includes("/");
+      const fileName = relative.split("/").pop()?.toLowerCase() ?? "";
+      if (!nested || LANGUAGE_PACK_MANIFEST_NAMES.has(fileName)) {
+        manifests.push(file);
+      }
+    }
+
+    for (const child of listed.folders) {
+      if (depth < 4) {
+        await walk(child, depth + 1);
+      }
+    }
+  }
+
+  await walk(root, 0);
+  return manifests;
+}
+
+async function readLanguageBundleArchive(file: File): Promise<loomArchiveEntry[]> {
+  const lowerName = file.name.toLowerCase();
+  const bytes = new Uint8Array(await file.arrayBuffer());
+
+  if (lowerName.endsWith(".zip")) {
+    return readZipBundle(bytes);
+  }
+  if (lowerName.endsWith(".tar")) {
+    return readTarBundle(bytes);
+  }
+  if (lowerName.endsWith(".tgz") || lowerName.endsWith(".tar.gz")) {
+    return readTarBundle(new Uint8Array(await gunzipBytes(bytes)));
+  }
+
+  throw new Error("Language bundle must be a .zip, .tar, .tgz, or .tar.gz archive.");
+}
+
+async function readZipBundle(bytes: Uint8Array): Promise<loomArchiveEntry[]> {
+  const zip = await JSZip.loadAsync(bytes);
+  const entries: loomArchiveEntry[] = [];
+
+  for (const entry of Object.values(zip.files)) {
+    if (entry.dir) {
+      continue;
+    }
+    entries.push({
+      path: entry.name,
+      data: await entry.async("uint8array"),
+    });
+  }
+
+  return entries;
+}
+
+function readTarBundle(bytes: Uint8Array): loomArchiveEntry[] {
+  const entries: loomArchiveEntry[] = [];
+  let offset = 0;
+
+  while (offset + 512 <= bytes.length) {
+    const header = bytes.slice(offset, offset + 512);
+    if (header.every((byte) => byte === 0)) {
+      break;
+    }
+
+    const name = readTarString(header, 0, 100);
+    const prefix = readTarString(header, 345, 155);
+    const path = prefix ? `${prefix}/${name}` : name;
+    const size = Number.parseInt(readTarString(header, 124, 12).trim() || "0", 8);
+    const type = String.fromCharCode(header[156] || 48);
+    const dataStart = offset + 512;
+    const dataEnd = dataStart + size;
+
+    if (!Number.isFinite(size) || size < 0 || dataEnd > bytes.length) {
+      throw new Error("Invalid tar archive entry size.");
+    }
+
+    if (type === "0" || type === "\0") {
+      entries.push({ path, data: bytes.slice(dataStart, dataEnd) });
+    }
+
+    offset = dataStart + Math.ceil(size / 512) * 512;
+  }
+
+  return entries;
+}
+
+async function gunzipBytes(bytes: Uint8Array): Promise<ArrayBuffer> {
+  const Decompression = globalThis.DecompressionStream;
+  if (!Decompression) {
+    throw new Error("This Obsidian runtime cannot decompress tar.gz bundles. Use .zip or .tar instead.");
+  }
+
+  const stream = new Blob([toArrayBuffer(bytes)]).stream().pipeThrough(new Decompression("gzip"));
+  return new Response(stream).arrayBuffer();
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+function readTarString(bytes: Uint8Array, offset: number, length: number): string {
+  const end = bytes.indexOf(0, offset);
+  const sliceEnd = end >= offset && end < offset + length ? end : offset + length;
+  return new TextDecoder().decode(bytes.slice(offset, sliceEnd)).trim();
+}
+
+function normalizeBundleEntries(entries: loomArchiveEntry[], fileName: string): loomArchiveEntry[] {
+  const cleaned = entries
+    .map((entry) => ({
+      path: normalizeArchivePath(entry.path),
+      data: entry.data,
+    }))
+    .filter((entry): entry is loomArchiveEntry => Boolean(entry.path));
+
+  const stripped = stripCommonArchiveRoot(cleaned);
+  if (!stripped.length) {
+    throw new Error(`Language bundle ${fileName} did not contain any usable files.`);
+  }
+  return stripped;
+}
+
+function normalizeArchivePath(path: string): string {
+  const normalized = normalizePath(path.replace(/\\/g, "/")).replace(/^\/+/, "");
+  const parts = normalized.split("/").filter(Boolean);
+  if (!parts.length || parts[0] === "__MACOSX" || parts[parts.length - 1] === ".DS_Store") {
+    return "";
+  }
+  if (parts.some((part) => part === "." || part === ".." || part.includes("\0") || /^[a-zA-Z]:$/.test(part))) {
+    throw new Error(`Invalid bundle path: ${path}`);
+  }
+  return parts.join("/");
+}
+
+function stripCommonArchiveRoot(entries: loomArchiveEntry[]): loomArchiveEntry[] {
+  const roots = entries.map((entry) => entry.path.split("/"));
+  if (!roots.length || roots.some((parts) => parts.length < 2)) {
+    return entries;
+  }
+
+  const root = roots[0][0];
+  if (!roots.every((parts) => parts[0] === root)) {
+    return entries;
+  }
+
+  return entries.map((entry) => ({
+    path: entry.path.split("/").slice(1).join("/"),
+    data: entry.data,
+  }));
+}
+
+function findBundleManifest(entries: loomArchiveEntry[]): loomArchiveEntry | null {
+  const named = entries.find((entry) => isBundleManifestCandidate(entry) && readBundleManifest(entry));
+  if (named) {
+    return named;
+  }
+
+  return entries.find((entry) => {
+    if (entry.path.includes("/") || !isBundleManifestCandidate(entry)) {
+      return false;
+    }
+    return Boolean(readBundleManifest(entry));
+  }) ?? null;
+}
+
+function isBundleManifestCandidate(entry: loomArchiveEntry): boolean {
+  const fileName = entry.path.split("/").pop()?.toLowerCase() ?? "";
+  return LANGUAGE_PACK_MANIFEST_NAMES.has(fileName) || !entry.path.includes("/") && fileName.endsWith(".json");
+}
+
+function readBundleManifest(entry: loomArchiveEntry): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(entry.data));
+    return isRecord(parsed) && typeof parsed.id === "string" && Array.isArray(parsed.languages) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPathWithin(path: string, parent: string): boolean {
+  return path === parent || path.startsWith(`${parent}/`);
 }
 
 function parseExternalLanguagePack(value: unknown, filePath: string): loomExternalLanguagePack | null {

@@ -167,7 +167,7 @@ function parseSourceReference(attrs: Record<string, string>): loomSourceReferenc
 }
 
 function parseExecutionContext(attrs: Record<string, string>) {
-  const container = attrs["loom-container"] ?? attrs.container;
+  const container = attrs["loom-execution"] ?? attrs.execution ?? attrs["loom-container"] ?? attrs.container;
   const timeout = attrs["loom-timeout"] ?? attrs.timeout;
   const workingDirectory = attrs["loom-cwd"] ?? attrs.cwd ?? attrs["working-directory"];
   const timeoutMs = timeout ? parsePositiveInteger(timeout) : undefined;

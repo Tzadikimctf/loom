@@ -20,7 +20,7 @@ export class loomSettingTab extends PluginSettingTab {
     this.renderLanguagePackages(this.createSection(containerEl, "Language Packages"));
     this.renderBuiltInRuntimes(this.createSection(containerEl, "Built-in Runtimes"));
     this.renderCustomLanguages(this.createSection(containerEl, "Custom Languages"));
-    void this.renderContainerGroups(this.createSection(containerEl, "Containerization Groups"));
+    void this.renderContainerGroups(this.createSection(containerEl, "Execution Groups"));
   }
 
   private createSection(containerEl: HTMLElement, title: string, open = false): HTMLElement {
@@ -298,6 +298,42 @@ export class loomSettingTab extends PluginSettingTab {
         }),
       );
 
+    const bundleInput = containerEl.createEl("input", {
+      attr: {
+        type: "file",
+        accept: ".zip,.tar,.tgz,.tar.gz,application/zip,application/x-tar,application/gzip",
+      },
+    });
+    bundleInput.style.display = "none";
+    bundleInput.addEventListener("change", async () => {
+      const file = bundleInput.files?.[0];
+      if (!file) {
+        return;
+      }
+
+      try {
+        const result = await this.loomPlugin.importExternalLanguageBundle(file);
+        await this.loomPlugin.saveSettings();
+        new Notice(`Imported language bundle ${result.packId} (${result.fileCount} files)`);
+        this.display();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        new Notice(`Failed to import language bundle: ${message}`);
+        console.warn("Failed to import loom language bundle", error);
+      } finally {
+        bundleInput.value = "";
+      }
+    });
+
+    new Setting(containerEl)
+      .setName("Import language bundle")
+      .setDesc("Unpack a zip, tar, or tar.gz language bundle into the plugin language-packs folder.")
+      .addButton((button) =>
+        button.setButtonText("Import").onClick(() => {
+          bundleInput.click();
+        }),
+      );
+
     new Setting(containerEl)
       .setName("Custom languages")
       .setDesc("Enable user-defined languages from the Custom Languages section.")
@@ -418,8 +454,8 @@ export class loomSettingTab extends PluginSettingTab {
       const groups = await this.loomPlugin.getContainerGroupSummaries();
 
       new Setting(containerEl)
-        .setName("Default containerization group")
-        .setDesc("The container group to run code blocks in by default if the note does not specify one.")
+        .setName("Default execution group")
+        .setDesc("The execution group to run code blocks in by default if the note does not specify one.")
         .addDropdown((dropdown) => {
           dropdown.addOption("", "None");
           for (const group of groups) {
@@ -433,8 +469,8 @@ export class loomSettingTab extends PluginSettingTab {
         });
 
       new Setting(containerEl)
-        .setName("Add new containerization group")
-        .setDesc("Create a new containerization group configuration folder.")
+        .setName("Add new execution group")
+        .setDesc("Create a new execution group configuration folder.")
         .addButton((button) =>
           button.setButtonText("+").onClick(() => {
             new ContainerGroupNameModal(this.app, async (groupName) => {
@@ -450,7 +486,7 @@ export class loomSettingTab extends PluginSettingTab {
 
               const adapter = this.app.vault.adapter;
               if (await adapter.exists(groupRelativePath)) {
-                new Notice("Container group folder already exists.");
+                new Notice("Execution group folder already exists.");
                 return;
               }
 
@@ -458,6 +494,9 @@ export class loomSettingTab extends PluginSettingTab {
               const defaultConfig = {
                 runtime: "docker",
                 image: "ubuntu:latest",
+                elevation: {
+                  mode: "default"
+                },
                 languages: {
                   python: {
                     command: "python3 {file}",
@@ -466,7 +505,7 @@ export class loomSettingTab extends PluginSettingTab {
                 }
               };
               await adapter.write(configPath, JSON.stringify(defaultConfig, null, 2));
-              new Notice(`Container group "${cleanName}" created.`);
+              new Notice(`Execution group "${cleanName}" created.`);
               this.display();
             }).open();
           }),
@@ -475,7 +514,7 @@ export class loomSettingTab extends PluginSettingTab {
       const listEl = containerEl.createDiv({ cls: "loom-container-group-list" });
       if (!groups.length) {
         listEl.createEl("p", {
-          text: "No container groups found in .obsidian/plugins/loom/containers.",
+          text: "No execution groups found in .obsidian/plugins/loom/containers.",
           cls: "setting-item-description",
         });
         return;
@@ -502,11 +541,11 @@ export class loomSettingTab extends PluginSettingTab {
     } catch (error) {
       containerEl.empty();
       containerEl.createEl("p", {
-        text: `Error loading container groups: ${error instanceof Error ? error.message : String(error)}`,
+      text: `Error loading execution groups: ${error instanceof Error ? error.message : String(error)}`,
         cls: "loom-settings-error",
         attr: { style: "color: var(--text-error); font-weight: bold; margin: 1em 0;" }
       });
-      console.error("loom: failed to render container groups:", error);
+      console.error("loom: failed to render execution groups:", error);
     }
   }
 
@@ -558,7 +597,7 @@ class ContainerGroupNameModal extends Modal {
   onOpen() {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "New Container Group Name" });
+    contentEl.createEl("h2", { text: "New Execution Group Name" });
 
     new Setting(contentEl)
       .setName("Group Name")
@@ -706,6 +745,7 @@ class EditContainerGroupModal extends Modal {
           .addOption("docker", "Docker")
           .addOption("podman", "Podman")
           .addOption("wsl", "WSL")
+          .addOption("ssh", "SSH Remote")
           .addOption("qemu", "QEMU")
           .addOption("custom", "Custom")
           .setValue(this.configObj.runtime || "docker")
@@ -761,7 +801,7 @@ class EditContainerGroupModal extends Modal {
 
     if (
       this.configObj.elevation.mode === "root" &&
-      (this.configObj.runtime === "qemu" || this.configObj.runtime === "wsl" || this.configObj.runtime === "custom")
+      (this.configObj.runtime === "qemu" || this.configObj.runtime === "wsl" || this.configObj.runtime === "custom" || this.configObj.runtime === "ssh")
     ) {
       new Setting(containerEl)
         .setName("Elevation command prefix")
@@ -790,6 +830,38 @@ class EditContainerGroupModal extends Modal {
               this.configObj.wsl.interactive = val;
             });
         });
+    }
+
+    if (this.configObj.runtime === "ssh") {
+      if (!this.configObj.ssh || typeof this.configObj.ssh !== "object") {
+        this.configObj.ssh = this.configObj.remote && typeof this.configObj.remote === "object"
+          ? this.configObj.remote
+          : { target: "", workspace: "/tmp/loom" };
+      }
+
+      new Setting(containerEl)
+        .setName("SSH Target")
+        .setDesc("Remote SSH target, for example user@vps or user@host.")
+        .addText((text) => {
+          text
+            .setValue(this.configObj.ssh.target || this.configObj.ssh.sshTarget || "")
+            .onChange((val) => {
+              this.configObj.ssh.target = val.trim();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName("Remote Workspace")
+        .setDesc("Remote folder where Loom uploads snippets before running them.")
+        .addText((text) => {
+          text
+            .setValue(this.configObj.ssh.workspace || this.configObj.ssh.remoteWorkspace || "/tmp/loom")
+            .onChange((val) => {
+              this.configObj.ssh.workspace = val.trim();
+            });
+        });
+
+      this.renderRemoteTransportSettings(containerEl, this.configObj.ssh, true);
     }
 
     // Conditional QEMU Settings
@@ -841,7 +913,11 @@ class EditContainerGroupModal extends Modal {
               this.configObj.qemu.sshArgs = val.trim() || undefined;
             });
         });
+
+      this.renderRemoteTransportSettings(containerEl, this.configObj.qemu, false);
     }
+
+    this.renderOutputFilters(containerEl);
 
     // Conditional Custom Settings
     if (this.configObj.runtime === "custom") {
@@ -871,6 +947,173 @@ class EditContainerGroupModal extends Modal {
             });
         });
     }
+  }
+
+  renderRemoteTransportSettings(containerEl: HTMLElement, remoteConfig: any, includeSshSettings: boolean) {
+    if (includeSshSettings) {
+      new Setting(containerEl)
+        .setName("SSH Executable")
+        .setDesc("Optional. Path to SSH client executable, defaults to ssh.")
+        .addText((text) => {
+          text
+            .setValue(remoteConfig.sshExecutable || "")
+            .onChange((val) => {
+              remoteConfig.sshExecutable = val.trim() || undefined;
+            });
+        });
+
+      new Setting(containerEl)
+        .setName("SSH Arguments")
+        .setDesc("Optional. Additional SSH CLI flags, such as -p 2222.")
+        .addText((text) => {
+          text
+            .setValue(remoteConfig.sshArgs || "")
+            .onChange((val) => {
+              remoteConfig.sshArgs = val.trim() || undefined;
+            });
+        });
+    }
+
+    new Setting(containerEl)
+      .setName("SSH auth socket")
+      .setDesc("Optional. Override SSH_AUTH_SOCK for this group, useful for Bitwarden or another SSH agent.")
+      .addText((text) => {
+        text
+          .setPlaceholder("/path/to/agent.sock")
+          .setValue(remoteConfig.sshAuthSock || remoteConfig.authSock || remoteConfig.sshAgentSocket || "")
+          .onChange((val) => {
+            remoteConfig.sshAuthSock = val.trim() || undefined;
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("SCP Executable")
+      .setDesc("Optional. Path to SCP executable, defaults to scp.")
+      .addText((text) => {
+        text
+          .setValue(remoteConfig.scpExecutable || "")
+          .onChange((val) => {
+            remoteConfig.scpExecutable = val.trim() || undefined;
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("SCP Arguments")
+      .setDesc("Optional. Additional SCP CLI flags. Use -P for ports with OpenSSH scp.")
+      .addText((text) => {
+        text
+          .setValue(remoteConfig.scpArgs || "")
+          .onChange((val) => {
+            remoteConfig.scpArgs = val.trim() || undefined;
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Clean up remote snippets")
+      .setDesc("Delete uploaded temp files from the remote workspace after each run.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(remoteConfig.cleanupRemoteFile !== false)
+          .onChange((value) => {
+            remoteConfig.cleanupRemoteFile = value;
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Remote mkdir command")
+      .setDesc("Optional. Command used to create the remote workspace. Supports {workspace}.")
+      .addText((text) => {
+        text
+          .setPlaceholder("mkdir -p {workspace}")
+          .setValue(remoteConfig.mkdirCommand || "")
+          .onChange((val) => {
+            remoteConfig.mkdirCommand = val.trim() || undefined;
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Remote cleanup command")
+      .setDesc("Optional. Command used to delete uploaded snippets. Supports {file}.")
+      .addText((text) => {
+        text
+          .setPlaceholder("rm -f {file}")
+          .setValue(remoteConfig.cleanupCommand || "")
+          .onChange((val) => {
+            remoteConfig.cleanupCommand = val.trim() || undefined;
+          });
+      });
+
+    const healthCheck = remoteConfig.healthCheck && typeof remoteConfig.healthCheck === "object" ? remoteConfig.healthCheck : {};
+    new Setting(containerEl)
+      .setName("Remote health check")
+      .setDesc("Optional command run over SSH before uploads, for example uname -a.")
+      .addText((text) => {
+        text
+          .setValue(healthCheck.command || "")
+          .onChange((val) => {
+            const command = val.trim();
+            if (command) {
+              remoteConfig.healthCheck = { ...(remoteConfig.healthCheck || {}), command };
+            } else {
+              delete remoteConfig.healthCheck;
+            }
+          });
+      });
+  }
+
+  renderOutputFilters(containerEl: HTMLElement) {
+    if (!this.configObj.outputFilters || typeof this.configObj.outputFilters !== "object") {
+      this.configObj.outputFilters = {};
+    }
+    const filters = this.configObj.outputFilters;
+
+    containerEl.createEl("h3", { text: "Output Filters", attr: { style: "margin-top: 1.5rem;" } });
+
+    new Setting(containerEl)
+      .setName("Strip ANSI control sequences")
+      .setDesc("Remove terminal color/control escape sequences from stdout and stderr.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(filters.stripAnsi === true)
+          .onChange((value) => {
+            filters.stripAnsi = value || undefined;
+          });
+      });
+
+    this.addOutputFilterText(containerEl, filters, "Stdout start regex", "Drop stdout before the first match.", "stdoutStart");
+    this.addOutputFilterText(containerEl, filters, "Stdout end regex", "Drop stdout after the first match.", "stdoutEnd");
+    this.addOutputFilterText(containerEl, filters, "Stderr start regex", "Drop stderr before the first match.", "stderrStart");
+    this.addOutputFilterText(containerEl, filters, "Stderr end regex", "Drop stderr after the first match.", "stderrEnd");
+    this.addOutputFilterList(containerEl, filters, "Strip stdout regexes", "One regex per line to remove from stdout.", "stripStdout");
+    this.addOutputFilterList(containerEl, filters, "Strip stderr regexes", "One regex per line to remove from stderr.", "stripStderr");
+  }
+
+  addOutputFilterText(containerEl: HTMLElement, filters: any, name: string, description: string, key: string) {
+    new Setting(containerEl)
+      .setName(name)
+      .setDesc(description)
+      .addText((text) => {
+        text
+          .setValue(filters[key] || "")
+          .onChange((val) => {
+            filters[key] = val.trim() || undefined;
+          });
+      });
+  }
+
+  addOutputFilterList(containerEl: HTMLElement, filters: any, name: string, description: string, key: string) {
+    new Setting(containerEl)
+      .setName(name)
+      .setDesc(description)
+      .addTextArea((text) => {
+        text.inputEl.rows = 3;
+        text.inputEl.style.fontFamily = "monospace";
+        text.setValue(Array.isArray(filters[key]) ? filters[key].join("\n") : filters[key] || "");
+        text.onChange((val) => {
+          const values = val.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+          filters[key] = values.length ? values : undefined;
+        });
+      });
   }
 
   renderLanguagesTab(containerEl: HTMLElement) {
@@ -995,7 +1238,7 @@ class EditContainerGroupModal extends Modal {
 
     if (this.dockerfileText === null) {
       containerEl.createEl("p", {
-        text: "No Dockerfile exists in this container group directory.",
+        text: "No Dockerfile exists in this execution group directory.",
         cls: "setting-item-description",
       });
 
@@ -1067,6 +1310,10 @@ class EditContainerGroupModal extends Modal {
     }
     if (this.configObj.runtime === "qemu" && (!this.configObj.qemu?.sshTarget || !this.configObj.qemu?.remoteWorkspace)) {
       new Notice("QEMU runtime requires SSH Target and Remote Workspace.");
+      return;
+    }
+    if (this.configObj.runtime === "ssh" && (!this.configObj.ssh?.target || !this.configObj.ssh?.workspace)) {
+      new Notice("SSH runtime requires SSH Target and Remote Workspace.");
       return;
     }
     if (this.configObj.runtime === "custom" && !this.configObj.custom?.executable) {

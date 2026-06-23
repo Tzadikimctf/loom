@@ -1,4 +1,4 @@
-import { Notice, type App, type TFile } from "obsidian";
+import type { App, TFile } from "obsidian";
 import { closeSync, existsSync, openSync } from "fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
 import { basename, join, normalize as normalizeFsPath, posix as posixPath } from "path";
@@ -8,7 +8,7 @@ import { splitCommandLine } from "../utils/command";
 import { findEnabledCommandLanguage } from "../languagePackages";
 import type { loomCodeBlock, loomPluginSettings, loomRunContext, loomRunResult } from "../types";
 
-type loomContainerRuntime = "docker" | "podman" | "qemu" | "wsl" | "custom";
+type loomContainerRuntime = "docker" | "podman" | "qemu" | "wsl" | "ssh" | "custom";
 type loomContainerElevationMode = "default" | "root";
 
 interface loomContainerLanguageConfig {
@@ -28,11 +28,29 @@ interface loomQemuConfig {
   remoteWorkspace: string;
   sshExecutable?: string;
   sshArgs?: string;
+  sshAuthSock?: string;
+  scpExecutable?: string;
+  scpArgs?: string;
+  cleanupRemoteFile?: boolean;
   startCommand?: string;
   buildCommand?: string;
   teardownCommand?: string;
   healthCheck?: loomCommandExpectation;
   manager?: loomQemuManagerConfig;
+}
+
+interface loomRemoteConfig {
+  target: string;
+  workspace: string;
+  sshExecutable?: string;
+  sshArgs?: string;
+  sshAuthSock?: string;
+  scpExecutable?: string;
+  scpArgs?: string;
+  cleanupRemoteFile?: boolean;
+  mkdirCommand?: string;
+  cleanupCommand?: string;
+  healthCheck?: loomCommandExpectation;
 }
 
 interface loomQemuManagerConfig {
@@ -77,9 +95,21 @@ interface loomContainerConfig {
   elevation: loomContainerElevationConfig;
   wsl?: loomWslConfig;
   healthCheck?: loomCommandExpectation;
+  outputFilters?: loomOutputFilterConfig;
+  ssh?: loomRemoteConfig;
   qemu?: loomQemuConfig;
   custom?: loomCustomRuntimeConfig;
   languages: Record<string, loomContainerLanguageConfig>;
+}
+
+interface loomOutputFilterConfig {
+  stripAnsi?: boolean;
+  stdoutStart?: RegExp;
+  stdoutEnd?: RegExp;
+  stderrStart?: RegExp;
+  stderrEnd?: RegExp;
+  stripStdout?: RegExp[];
+  stripStderr?: RegExp[];
 }
 
 interface loomCustomRuntimeRequest {
@@ -101,9 +131,19 @@ interface loomCustomRuntimeRequest {
   config: {
     executable?: string;
     custom?: loomCustomRuntimeConfig;
+    ssh?: loomRemoteConfig;
     qemu?: loomQemuConfig;
     healthCheck?: loomCommandExpectation;
     elevation?: loomContainerElevationConfig;
+    outputFilters?: {
+      stripAnsi?: boolean;
+      stdoutStart?: string;
+      stdoutEnd?: string;
+      stderrStart?: string;
+      stderrEnd?: string;
+      stripStdout?: string[];
+      stripStderr?: string[];
+    };
   };
 }
 
@@ -117,7 +157,7 @@ export class loomContainerRunner {
 
   getContainerGroupName(file: TFile): string | null {
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-    const value = frontmatter?.["loom-container"];
+    const value = frontmatter?.["loom-execution"] ?? frontmatter?.["loom-container"];
     return typeof value === "string" && value.trim() ? value.trim() : null;
   }
 
@@ -146,6 +186,9 @@ export class loomContainerRunner {
             const pieces = [`runtime: ${config.runtime}`];
             if ((config.runtime === "docker" || config.runtime === "podman") && hasDockerfile) {
               pieces.push("Dockerfile");
+            }
+            if (config.runtime === "ssh" && config.ssh?.target) {
+              pieces.push(`ssh: ${config.ssh.target}`);
             }
             if (config.runtime === "qemu" && config.qemu?.sshTarget) {
               pieces.push(`ssh: ${config.qemu.sshTarget}`);
@@ -212,7 +255,7 @@ export class loomContainerRunner {
           result = await this.runOciContainer(groupName, groupPath, config, language, tempFileName, context, settings);
           break;
         case "qemu":
-          result = await this.runQemu(groupName, groupPath, config, language, tempFileName, context);
+          result = await this.runQemu(groupName, groupPath, config, language, tempFileName, tempFilePath, context);
           break;
         case "custom":
           result = await this.runCustom(groupName, groupPath, config, block, language, tempFileName, tempFilePath, context);
@@ -220,9 +263,14 @@ export class loomContainerRunner {
         case "wsl":
           result = await this.runWslContainer(groupName, groupPath, config, language, tempFileName, context);
           break;
+        case "ssh":
+          result = await this.runSshRemote(groupName, groupPath, config, language, tempFileName, tempFilePath, context);
+          break;
         default:
           throw new Error(`Unsupported runtime: ${config.runtime}`);
       }
+
+      this.applyOutputFilters(result, config.outputFilters);
 
       if (isFallback) {
         const fallbackMsg = `[Loom] Language '${block.language}' was not declared in container group. Running using default command: ${language.command}`;
@@ -249,6 +297,12 @@ export class loomContainerRunner {
         return this.buildImage(groupName, groupPath, config, timeoutMs, signal);
       case "qemu":
         return this.buildQemu(groupName, groupPath, config, timeoutMs, signal);
+      case "ssh":
+        return this.createSyntheticResult(
+          `container:${groupName}:ssh:build`,
+          `SSH ${groupName} build`,
+          `SSH remote ${config.ssh?.target ?? "(unconfigured)"} does not require a build step.\n`,
+        );
       case "custom":
         return this.runCustomWrapper(groupName, groupPath, config, this.createCustomRequest("build", groupName, groupPath, config, timeoutMs), timeoutMs, signal);
       case "wsl":
@@ -270,7 +324,11 @@ export class loomContainerRunner {
     settings: loomPluginSettings,
   ): Promise<loomRunResult> {
     const image = await this.resolveImage(groupName, groupPath, config, context, settings);
-    const command = splitCommandLine(language.command!.replaceAll("{file}", tempFileName));
+    const workspacePath = "/workspace";
+    const containerFile = posixPath.join(workspacePath, tempFileName);
+    const workingDirectory = normalizeFsPath(context.workingDirectory || groupPath);
+    const useContextWorkingDirectory = workingDirectory !== normalizeFsPath(groupPath);
+    const command = splitCommandLine(language.command!.replaceAll("{file}", containerFile));
     if (!command.length) {
       throw new Error("Container command is empty.");
     }
@@ -284,9 +342,10 @@ export class loomContainerRunner {
         "--rm",
         ...(context.stdin != null ? ["-i"] : []),
         "-v",
-        `${groupPath}:/workspace`,
-        "-w",
-        "/workspace",
+        `${groupPath}:${workspacePath}`,
+        ...(useContextWorkingDirectory
+          ? ["-v", `${workingDirectory}:/loom-cwd`, "-w", "/loom-cwd"]
+          : ["-w", workspacePath]),
         ...this.ociElevationArgs(config),
         image,
         ...command,
@@ -304,6 +363,7 @@ export class loomContainerRunner {
     config: loomContainerConfig,
     language: loomContainerLanguageConfig,
     tempFileName: string,
+    tempFilePath: string,
     context: loomRunContext,
   ): Promise<loomRunResult> {
     const qemu = this.requireQemuConfig(config);
@@ -312,29 +372,91 @@ export class loomContainerRunner {
     await this.runHealthCheck(qemu.healthCheck, groupPath, context.timeoutMs, context.signal, `container:${groupName}:qemu:health`, `QEMU ${groupName} health check`);
 
     try {
-      const remoteFile = posixPath.join(qemu.remoteWorkspace, tempFileName);
-      const remoteCommand = this.applyCommandPrefix(config, language.command!.replaceAll("{file}", shellQuote(remoteFile)));
-      if (!remoteCommand.trim()) {
-        throw new Error("QEMU command is empty.");
-      }
-
-      return await runProcess({
-        runnerId: `container:${groupName}:qemu`,
-        runnerName: `QEMU ${groupName}`,
-        executable: qemu.sshExecutable || "ssh",
-        args: [
-          ...splitCommandLine(qemu.sshArgs || ""),
-          qemu.sshTarget,
-          `cd ${shellQuote(qemu.remoteWorkspace)} && ${remoteCommand}`,
-        ],
-        workingDirectory: groupPath,
-        timeoutMs: context.timeoutMs,
-        signal: context.signal,
-        stdin: context.stdin,
-      });
+      return await this.runRemoteLanguage(
+        groupName,
+        groupPath,
+        "qemu",
+        `QEMU ${groupName}`,
+        config,
+        this.remoteConfigFromQemu(qemu),
+        language,
+        tempFileName,
+        tempFilePath,
+        context,
+      );
     } finally {
       await this.runOptionalCommand(qemu.teardownCommand, groupPath, context.timeoutMs, context.signal, `container:${groupName}:qemu:teardown`, `QEMU ${groupName} teardown`);
       await this.stopManagedQemuIfNeeded(groupName, groupPath, qemu, context.timeoutMs, context.signal);
+    }
+  }
+
+  private async runSshRemote(
+    groupName: string,
+    groupPath: string,
+    config: loomContainerConfig,
+    language: loomContainerLanguageConfig,
+    tempFileName: string,
+    tempFilePath: string,
+    context: loomRunContext,
+  ): Promise<loomRunResult> {
+    return this.runRemoteLanguage(
+      groupName,
+      groupPath,
+      "ssh",
+      `SSH ${groupName}`,
+      config,
+      this.requireSshConfig(config),
+      language,
+      tempFileName,
+      tempFilePath,
+      context,
+    );
+  }
+
+  private async runRemoteLanguage(
+    groupName: string,
+    groupPath: string,
+    runtimeId: "ssh" | "qemu",
+    runnerName: string,
+    config: loomContainerConfig,
+    remote: loomRemoteConfig,
+    language: loomContainerLanguageConfig,
+    tempFileName: string,
+    tempFilePath: string,
+    context: loomRunContext,
+  ): Promise<loomRunResult> {
+    const remoteFile = posixPath.join(remote.workspace, tempFileName);
+    await this.ensureRemoteWorkspace(groupName, groupPath, runtimeId, runnerName, remote, context.timeoutMs, context.signal);
+    await this.runRemoteHealthCheck(groupName, groupPath, runtimeId, runnerName, remote, context.timeoutMs, context.signal);
+    await this.uploadRemoteFile(groupName, groupPath, runtimeId, runnerName, remote, tempFilePath, remoteFile, context.timeoutMs, context.signal);
+
+    let result: loomRunResult | undefined;
+    try {
+      const remoteCommand = this.applyCommandPrefix(config, language.command!.replaceAll("{file}", shellQuote(remoteFile)));
+      if (!remoteCommand.trim()) {
+        throw new Error(`${runnerName} command is empty.`);
+      }
+      result = await this.runRemoteCommand(
+        groupName,
+        groupPath,
+        runtimeId,
+        runnerName,
+        remote,
+        `cd ${shellQuote(remote.workspace)} && ${remoteCommand}`,
+        context.timeoutMs,
+        context.signal,
+        context.stdin,
+        "run",
+      );
+      return result;
+    } finally {
+      if (remote.cleanupRemoteFile !== false) {
+        const cleanup = await this.cleanupRemoteFile(groupName, groupPath, runtimeId, runnerName, remote, remoteFile, context.timeoutMs, context.signal);
+        if (result && !cleanup.success) {
+          const warning = `Remote cleanup failed: ${cleanup.stderr || cleanup.stdout || `exit ${cleanup.exitCode}`}`;
+          result.warning = result.warning ? `${result.warning}\n${warning}` : warning;
+        }
+      }
     }
   }
 
@@ -419,6 +541,137 @@ export class loomContainerRunner {
       signal: context.signal,
       stdin: context.stdin,
     });
+  }
+
+  private remoteConfigFromQemu(qemu: loomQemuConfig): loomRemoteConfig {
+    return {
+      target: qemu.sshTarget,
+      workspace: qemu.remoteWorkspace,
+      sshExecutable: qemu.sshExecutable,
+      sshArgs: qemu.sshArgs,
+      sshAuthSock: qemu.sshAuthSock,
+      scpExecutable: qemu.scpExecutable,
+      scpArgs: qemu.scpArgs,
+      cleanupRemoteFile: qemu.cleanupRemoteFile,
+    };
+  }
+
+  private async ensureRemoteWorkspace(
+    groupName: string,
+    groupPath: string,
+    runtimeId: "ssh" | "qemu",
+    runnerName: string,
+    remote: loomRemoteConfig,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const command = (remote.mkdirCommand || "mkdir -p {workspace}").replaceAll("{workspace}", shellQuote(remote.workspace));
+    const result = await this.runRemoteCommand(groupName, groupPath, runtimeId, `${runnerName} mkdir`, remote, command, timeoutMs, signal, undefined, "mkdir");
+    if (!result.success) {
+      throw new Error(`${runnerName} workspace setup failed: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`);
+    }
+  }
+
+  private async runRemoteHealthCheck(
+    groupName: string,
+    groupPath: string,
+    runtimeId: "ssh" | "qemu",
+    runnerName: string,
+    remote: loomRemoteConfig,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!remote.healthCheck) {
+      return;
+    }
+    const result = await this.runRemoteCommand(groupName, groupPath, runtimeId, `${runnerName} remote health check`, remote, remote.healthCheck.command, timeoutMs, signal, undefined, "health");
+    const combinedOutput = `${result.stdout}\n${result.stderr}`;
+    if (!result.success) {
+      throw new Error(`${runnerName} remote health check failed: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`);
+    }
+    if (remote.healthCheck.negativeResponse && combinedOutput.includes(remote.healthCheck.negativeResponse)) {
+      throw new Error(`${runnerName} remote health check returned negative response: ${remote.healthCheck.negativeResponse}`);
+    }
+    if (remote.healthCheck.positiveResponse && !combinedOutput.includes(remote.healthCheck.positiveResponse)) {
+      throw new Error(`${runnerName} remote health check did not return positive response: ${remote.healthCheck.positiveResponse}`);
+    }
+  }
+
+  private async uploadRemoteFile(
+    groupName: string,
+    groupPath: string,
+    runtimeId: "ssh" | "qemu",
+    runnerName: string,
+    remote: loomRemoteConfig,
+    localFile: string,
+    remoteFile: string,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const result = await runProcess({
+      runnerId: `container:${groupName}:${runtimeId}:upload`,
+      runnerName: `${runnerName} upload`,
+      executable: remote.scpExecutable || "scp",
+      args: [
+        ...splitCommandLine(remote.scpArgs || ""),
+        localFile,
+        `${remote.target}:${remoteFile}`,
+      ],
+      workingDirectory: groupPath,
+      timeoutMs,
+      signal,
+      env: this.remoteProcessEnv(remote),
+    });
+    if (!result.success) {
+      throw new Error(`${runnerName} upload failed: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`);
+    }
+  }
+
+  private async cleanupRemoteFile(
+    groupName: string,
+    groupPath: string,
+    runtimeId: "ssh" | "qemu",
+    runnerName: string,
+    remote: loomRemoteConfig,
+    remoteFile: string,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<loomRunResult> {
+    const command = (remote.cleanupCommand || "rm -f {file}").replaceAll("{file}", shellQuote(remoteFile));
+    return this.runRemoteCommand(groupName, groupPath, runtimeId, `${runnerName} cleanup`, remote, command, timeoutMs, signal, undefined, "cleanup");
+  }
+
+  private async runRemoteCommand(
+    groupName: string,
+    groupPath: string,
+    runtimeId: "ssh" | "qemu",
+    runnerName: string,
+    remote: loomRemoteConfig,
+    command: string,
+    timeoutMs: number,
+    signal: AbortSignal,
+    stdin: string | undefined,
+    action: string,
+  ): Promise<loomRunResult> {
+    return runProcess({
+      runnerId: `container:${groupName}:${runtimeId}:${action}`,
+      runnerName,
+      executable: remote.sshExecutable || "ssh",
+      args: [
+        ...splitCommandLine(remote.sshArgs || ""),
+        remote.target,
+        command,
+      ],
+      workingDirectory: groupPath,
+      timeoutMs,
+      signal,
+      stdin,
+      env: this.remoteProcessEnv(remote),
+    });
+  }
+
+  private remoteProcessEnv(remote: loomRemoteConfig): NodeJS.ProcessEnv | undefined {
+    return remote.sshAuthSock ? { SSH_AUTH_SOCK: remote.sshAuthSock } : undefined;
   }
 
   private translateToWslPath(windowsPath: string): string {
@@ -514,6 +767,10 @@ export class loomContainerRunner {
       image?: unknown;
       wsl?: unknown;
       healthCheck?: unknown;
+      outputFilters?: unknown;
+      outputFilter?: unknown;
+      ssh?: unknown;
+      remote?: unknown;
       qemu?: unknown;
       custom?: unknown;
       elevation?: unknown;
@@ -556,6 +813,8 @@ export class loomContainerRunner {
       elevation: this.readElevationConfig(data.elevation),
       wsl: this.readWslConfig(data.wsl),
       healthCheck: this.readHealthCheck(data.healthCheck, "Container config healthCheck"),
+      outputFilters: this.readOutputFilters(data.outputFilters ?? data.outputFilter),
+      ssh: this.readSshConfig(data.ssh ?? data.remote, runtime),
       qemu: this.readQemuConfig(data.qemu),
       custom: this.readCustomConfig(data.custom),
       languages,
@@ -566,10 +825,13 @@ export class loomContainerRunner {
     if (value == null) {
       return "docker";
     }
-    if (value === "docker" || value === "podman" || value === "qemu" || value === "custom" || value === "wsl") {
+    if (value === "remote") {
+      return "ssh";
+    }
+    if (value === "docker" || value === "podman" || value === "qemu" || value === "custom" || value === "wsl" || value === "ssh") {
       return value;
     }
-    throw new Error("Container config runtime must be docker, podman, qemu, custom, or wsl.");
+    throw new Error("Container config runtime must be docker, podman, qemu, custom, wsl, ssh, or remote.");
   }
 
   private readWslConfig(value: unknown): loomWslConfig | undefined {
@@ -609,6 +871,59 @@ export class loomContainerRunner {
     };
   }
 
+  private readSshConfig(value: unknown, runtime: loomContainerRuntime): loomRemoteConfig | undefined {
+    if (value == null) {
+      if (runtime === "ssh") {
+        throw new Error("SSH runtime requires an ssh config object.");
+      }
+      return undefined;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Container config ssh must be an object.");
+    }
+    const data = value as Record<string, unknown>;
+    const target = optionalString(data.target ?? data.sshTarget);
+    const workspace = optionalString(data.workspace ?? data.remoteWorkspace);
+    if (!target) {
+      throw new Error("Container config ssh.target must be a string.");
+    }
+    if (!workspace) {
+      throw new Error("Container config ssh.workspace must be a string.");
+    }
+    return {
+      target,
+      workspace,
+      sshExecutable: optionalString(data.sshExecutable),
+      sshArgs: optionalString(data.sshArgs),
+      sshAuthSock: optionalString(data.sshAuthSock ?? data.authSock ?? data.sshAgentSocket),
+      scpExecutable: optionalString(data.scpExecutable),
+      scpArgs: optionalString(data.scpArgs),
+      cleanupRemoteFile: typeof data.cleanupRemoteFile === "boolean" ? data.cleanupRemoteFile : undefined,
+      mkdirCommand: optionalString(data.mkdirCommand),
+      cleanupCommand: optionalString(data.cleanupCommand),
+      healthCheck: this.readHealthCheck(data.healthCheck, "Container config ssh.healthCheck"),
+    };
+  }
+
+  private readOutputFilters(value: unknown): loomOutputFilterConfig | undefined {
+    if (value == null) {
+      return undefined;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Container config outputFilters must be an object.");
+    }
+    const data = value as Record<string, unknown>;
+    return {
+      stripAnsi: data.stripAnsi === true,
+      stdoutStart: optionalRegex(data.stdoutStart, "Container config outputFilters.stdoutStart"),
+      stdoutEnd: optionalRegex(data.stdoutEnd, "Container config outputFilters.stdoutEnd"),
+      stderrStart: optionalRegex(data.stderrStart, "Container config outputFilters.stderrStart"),
+      stderrEnd: optionalRegex(data.stderrEnd, "Container config outputFilters.stderrEnd"),
+      stripStdout: optionalRegexList(data.stripStdout, "Container config outputFilters.stripStdout"),
+      stripStderr: optionalRegexList(data.stripStderr, "Container config outputFilters.stripStderr"),
+    };
+  }
+
   private readQemuConfig(value: unknown): loomQemuConfig | undefined {
     if (value == null) {
       return undefined;
@@ -629,6 +944,10 @@ export class loomContainerRunner {
       remoteWorkspace: data.remoteWorkspace.trim(),
       sshExecutable: optionalString(data.sshExecutable),
       sshArgs: optionalString(data.sshArgs),
+      sshAuthSock: optionalString(data.sshAuthSock ?? data.authSock ?? data.sshAgentSocket),
+      scpExecutable: optionalString(data.scpExecutable),
+      scpArgs: optionalString(data.scpArgs),
+      cleanupRemoteFile: typeof data.cleanupRemoteFile === "boolean" ? data.cleanupRemoteFile : undefined,
       startCommand: optionalString(data.startCommand),
       buildCommand: optionalString(data.buildCommand),
       teardownCommand: optionalString(data.teardownCommand),
@@ -709,6 +1028,13 @@ export class loomContainerRunner {
     return config.qemu;
   }
 
+  private requireSshConfig(config: loomContainerConfig): loomRemoteConfig {
+    if (!config.ssh) {
+      throw new Error("SSH runtime requires an ssh config object.");
+    }
+    return config.ssh;
+  }
+
   private requireCustomConfig(config: loomContainerConfig): loomCustomRuntimeConfig {
     if (!config.custom) {
       throw new Error("Custom runtime requires a custom config object.");
@@ -730,6 +1056,43 @@ export class loomContainerRunner {
   private applyCommandPrefix(config: loomContainerConfig, command: string): string {
     const prefix = config.elevation.mode === "root" ? config.elevation.commandPrefix?.trim() : "";
     return prefix ? `${prefix} ${command}` : command;
+  }
+
+  private applyOutputFilters(result: loomRunResult, filters: loomOutputFilterConfig | undefined): void {
+    if (!filters) {
+      return;
+    }
+    result.stdout = this.filterOutputStream(result.stdout, filters.stdoutStart, filters.stdoutEnd, filters.stripStdout, filters.stripAnsi);
+    result.stderr = this.filterOutputStream(result.stderr, filters.stderrStart, filters.stderrEnd, filters.stripStderr, filters.stripAnsi);
+  }
+
+  private filterOutputStream(
+    value: string,
+    start: RegExp | undefined,
+    end: RegExp | undefined,
+    strip: RegExp[] | undefined,
+    stripAnsi: boolean | undefined,
+  ): string {
+    let output = stripAnsi ? value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "") : value;
+    if (start) {
+      start.lastIndex = 0;
+      const match = start.exec(output);
+      if (match) {
+        output = output.slice(match.index + match[0].length);
+      }
+    }
+    if (end) {
+      end.lastIndex = 0;
+      const match = end.exec(output);
+      if (match) {
+        output = output.slice(0, match.index);
+      }
+    }
+    for (const pattern of strip ?? []) {
+      pattern.lastIndex = 0;
+      output = output.replace(pattern, "");
+    }
+    return output;
   }
 
   private async runHealthCheck(
@@ -1250,12 +1613,44 @@ function normalizeExtension(extension: string): string {
   return trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
 }
 
-export function showDockerNotice(message: string): void {
-  new Notice(message, 8000);
-}
-
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function optionalRegex(value: unknown, label: string): RegExp | undefined {
+  if (value == null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be a string.`);
+  }
+  return regexFromString(value, label);
+}
+
+function optionalRegexList(value: unknown, label: string): RegExp[] | undefined {
+  if (value == null) {
+    return undefined;
+  }
+  const values = Array.isArray(value) ? value : typeof value === "string" ? value.split("\n") : null;
+  if (!values) {
+    throw new Error(`${label} must be a string or array of strings.`);
+  }
+  const patterns = values
+    .map((entry) => typeof entry === "string" ? entry.trim() : "")
+    .filter(Boolean)
+    .map((entry, index) => regexFromString(entry, `${label}[${index}]`, "g"));
+  return patterns.length ? patterns : undefined;
+}
+
+function regexFromString(value: string, label: string, fallbackFlags = ""): RegExp {
+  const literal = value.match(/^\/(.+)\/([a-z]*)$/i);
+  const source = literal ? literal[1] : value;
+  const flags = literal ? literal[2] : fallbackFlags;
+  try {
+    return new RegExp(source, flags);
+  } catch (error) {
+    throw new Error(`${label} is not a valid regular expression: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function optionalPositiveInteger(value: unknown, label: string): number | undefined {
@@ -1315,6 +1710,8 @@ function runtimeLabel(runtime: loomContainerRuntime): string {
       return "Custom";
     case "wsl":
       return "WSL";
+    case "ssh":
+      return "SSH";
   }
 }
 

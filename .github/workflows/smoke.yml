@@ -13,22 +13,25 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        profile:
-          - minimal
-          - systems
-          - proofs
-          - ebpf
-          - full
-
-        container:
-          - none
-        # include:
-        #   - profile: full
-        #     container: docker-test
-        #   - profile: full
-        #     container: podman-test
-        #   - profile: full
-        #     container: qemu-test
+        include:
+          - profile: minimal
+            container: none
+          - profile: systems
+            container: none
+          - profile: proofs
+            container: none
+          - profile: ebpf
+            container: none
+          - profile: full
+            container: none
+          - profile: minimal
+            container: docker-test
+          - profile: systems
+            container: docker-test
+          - profile: minimal
+            container: podman-test
+          - profile: systems
+            container: podman-test
 
     steps:
       - uses: actions/checkout@v4
@@ -40,25 +43,61 @@ jobs:
           cache: npm
       - uses: browser-actions/setup-chrome@v1
         id: setup-chrome
-      - run: sudo apt-get update && sudo apt-get install -y clang llvm bpftrace z3
+      - run: sudo apt-get update && sudo apt-get install -y clang llvm bpftrace z3 podman
       - run: git fetch origin vault:vault
-      - name: Prepend container to test vault note
+      - name: Configure container test vault
         if: matrix.container != 'none'
         run: |
           git checkout vault
-          printf -- "---\nloom-container: ${{ matrix.container }}\n---\n\n" | cat - "Smoke Suite.md" > temp_suite.md
+          group="${{ matrix.container }}"
+          runtime="${group%-test}"
+          group_dir=".obsidian/plugins/loom/containers/${group}"
+          mkdir -p "${group_dir}"
+          cat > "${group_dir}/config.json" <<JSON
+          {
+            "runtime": "${runtime}",
+            "image": "docker.io/library/python:3.12-bookworm",
+            "elevation": {
+              "mode": "default"
+            },
+            "languages": {
+              "shell": {
+                "useDefault": true
+              },
+              "sh": {
+                "useDefault": true
+              },
+              "python": {
+                "useDefault": true
+              },
+              "c": {
+                "useDefault": true
+              },
+              "cpp": {
+                "useDefault": true
+              }
+            }
+          }
+          JSON
+          printf -- "---\nloom-execution: ${{ matrix.container }}\n---\n\n" | cat - "Smoke Suite.md" > temp_suite.md
           mv temp_suite.md "Smoke Suite.md"
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
-          git commit -am "Prepend container frontmatter"
+          git add "Smoke Suite.md" "${group_dir}/config.json"
+          git commit -m "Configure container smoke fixture"
           git checkout -f -
       - run: npm ci --legacy-peer-deps
+      - name: Pull container smoke image
+        if: matrix.container != 'none'
+        run: |
+          runtime="${{ matrix.container }}"
+          sudo "${runtime%-test}" pull docker.io/library/python:3.12-bookworm
       - run: npm run smoke -- --profile ${{ matrix.profile }} --require-pdf --require-all
-        if: matrix.profile != 'ebpf' && matrix.profile != 'full'
+        if: matrix.profile != 'ebpf' && matrix.profile != 'full' && matrix.container == 'none'
         env:
           LOOM_CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
       - run: sudo --preserve-env=PATH,LOOM_CHROME_PATH npm run smoke -- --profile ${{ matrix.profile }} --require-pdf --require-all
-        if: matrix.profile == 'ebpf' || matrix.profile == 'full'
+        if: matrix.profile == 'ebpf' || matrix.profile == 'full' || matrix.container != 'none'
         env:
           LOOM_CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
       - uses: actions/upload-artifact@v4
