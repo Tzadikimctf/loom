@@ -93,6 +93,19 @@ export class loomSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Visible output lines")
+      .setDesc("Limit each stdout, stderr, and warning panel to this many visible lines. Use 0 for unlimited output.")
+      .addText((text) =>
+        text.setPlaceholder("0").setValue(String(this.loomPlugin.settings.outputVisibleLines ?? 0)).onChange(async (value) => {
+          const parsed = Number.parseInt(value.trim(), 10);
+          if (!Number.isNaN(parsed) && parsed >= 0) {
+            this.loomPlugin.settings.outputVisibleLines = Math.min(parsed, 2000);
+            await this.loomPlugin.saveSettings();
+          }
+        }),
+      );
+
+    new Setting(containerEl)
       .setName("Auto-run on file open")
       .setDesc("Run all supported blocks in the active note when it opens. Disabled by default.")
       .addToggle((toggle) =>

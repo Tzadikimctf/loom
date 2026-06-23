@@ -221,6 +221,10 @@ hello
 
 The parser skips these regions and generated output blocks are never executed
 
+Output panels can also be capped to a visible line window while keeping the full stdout, stderr, and warning text scrollable in the panel. Set **Visible output lines** in settings for a vault wide default, or use `loom-output-lines=20` on a specific block. Use `0` to keep output unlimited
+
+Blocks can materialise output into vault files with `loom-output-file="path/to/file.txt"`. Relative paths resolve from the note folder, leading slash paths resolve from the vault root, and Loom creates missing parent folders. By default the file receives stdout and is replaced on each run. Use `loom-output-file-mode=append`, `loom-output-file-streams=metadata,stdout,stderr,warning`, or `loom-output-file-format=json` when a block needs a different artifact shape
+
 ## Partial source extraction
 
 loom can run part of another file while keeping the call site in your note. Add source attributes to the fence info string:

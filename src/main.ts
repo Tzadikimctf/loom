@@ -38,6 +38,16 @@ import { splitCommandLine } from "./utils/command";
 import type { loomCodeBlock, loomPluginSettings, loomResolvedExecutionContext, loomStoredOutput } from "./types";
 
 const loomRefreshEffect = StateEffect.define<void>();
+type loomOutputFileMode = "replace" | "append";
+type loomOutputFileFormat = "text" | "json";
+type loomOutputFileStream = "stdout" | "stderr" | "warning" | "metadata";
+
+interface loomOutputFileTarget {
+  path: string;
+  mode: loomOutputFileMode;
+  format: loomOutputFileFormat;
+  streams: loomOutputFileStream[];
+}
 
 class ExecutionConsentModal extends Modal {
   constructor(
@@ -340,7 +350,9 @@ export default class loomPlugin extends Plugin {
       return;
     }
 
-    container.appendChild(createOutputPanel(output));
+    container.appendChild(createOutputPanel(output, {
+      defaultVisibleLines: this.settings.outputVisibleLines ?? 0,
+    }));
   }
 
   async runActiveBlockById(blockId: string): Promise<void> {
@@ -476,6 +488,7 @@ export default class loomPlugin extends Plugin {
         const contextNotice = this.formatExecutionContextNotice(executionContext);
         result.warning = result.warning ? `${contextNotice}\n${result.warning}` : contextNotice;
       }
+      await this.writeOutputFileIfRequested(file, block, result);
 
       this.outputs.set(block.id, {
         blockId: block.id,
@@ -958,6 +971,163 @@ export default class loomPlugin extends Plugin {
       lines.splice(currentBlock.endLine + 1, 0, ...rendered);
       return lines.join("\n");
     });
+  }
+
+  private async writeOutputFileIfRequested(file: TFile, block: loomCodeBlock, result: loomStoredOutput["result"]): Promise<void> {
+    try {
+      const target = this.readOutputFileTarget(file, block);
+      if (!target) {
+        return;
+      }
+
+      await this.ensureVaultParentFolder(target.path);
+      const rendered = target.format === "json"
+        ? this.renderOutputFileJson(file, block, result, target)
+        : this.renderOutputFileText(result, target);
+      const current = target.mode === "append" && await this.app.vault.adapter.exists(target.path)
+        ? await this.app.vault.adapter.read(target.path)
+        : "";
+      const next = target.mode === "append" && current
+        ? `${current.replace(/\s*$/, "\n")}${rendered}`
+        : rendered;
+      await this.app.vault.adapter.write(target.path, next);
+
+      const streamList = target.streams.join(",");
+      const notice = `Wrote output file ${target.path} (${target.mode}, ${target.format}, ${streamList}).`;
+      result.warning = result.warning ? `${notice}\n${result.warning}` : notice;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const notice = `Failed to write output file: ${message}`;
+      result.warning = result.warning ? `${notice}\n${result.warning}` : notice;
+    }
+  }
+
+  private readOutputFileTarget(file: TFile, block: loomCodeBlock): loomOutputFileTarget | null {
+    const rawPath = block.attributes["loom-output-file"] ?? block.attributes["output-file"];
+    if (!rawPath?.trim()) {
+      return null;
+    }
+
+    return {
+      path: this.resolveOutputVaultPath(file, rawPath),
+      mode: this.readOutputFileMode(block),
+      format: this.readOutputFileFormat(block),
+      streams: this.readOutputFileStreams(block),
+    };
+  }
+
+  private readOutputFileMode(block: loomCodeBlock): loomOutputFileMode {
+    const append = block.attributes["loom-output-append"] ?? block.attributes["output-append"];
+    if (append && !["0", "false", "no", "off"].includes(append.trim().toLowerCase())) {
+      return "append";
+    }
+
+    const mode = (block.attributes["loom-output-file-mode"] ?? block.attributes["output-file-mode"] ?? "replace").trim().toLowerCase();
+    if (mode === "append") {
+      return "append";
+    }
+    if (mode === "replace") {
+      return "replace";
+    }
+    throw new Error(`Unsupported loom-output-file-mode: ${mode}. Use replace or append.`);
+  }
+
+  private readOutputFileFormat(block: loomCodeBlock): loomOutputFileFormat {
+    const format = (block.attributes["loom-output-file-format"] ?? block.attributes["output-file-format"] ?? "text").trim().toLowerCase();
+    if (format === "text" || format === "json") {
+      return format;
+    }
+    throw new Error(`Unsupported loom-output-file-format: ${format}. Use text or json.`);
+  }
+
+  private readOutputFileStreams(block: loomCodeBlock): loomOutputFileStream[] {
+    const value = block.attributes["loom-output-file-streams"] ?? block.attributes["output-file-streams"] ?? "stdout";
+    const parsed = value
+      .split(",")
+      .map((stream) => stream.trim().toLowerCase())
+      .filter(Boolean);
+    const expanded = parsed.includes("all")
+      ? ["metadata", "stdout", "warning", "stderr"]
+      : parsed;
+    const streams = expanded.map((stream) => {
+      if (stream === "stdout" || stream === "stderr" || stream === "warning" || stream === "metadata") {
+        return stream;
+      }
+      throw new Error(`Unsupported loom-output-file-streams entry: ${stream}.`);
+    });
+    return streams.length ? [...new Set(streams)] : ["stdout"];
+  }
+
+  private resolveOutputVaultPath(file: TFile, rawPath: string): string {
+    const trimmed = rawPath.trim();
+    if (!trimmed || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)) {
+      throw new Error("loom-output-file must be a vault-relative path.");
+    }
+
+    const path = trimmed.startsWith("/")
+      ? normalizePath(trimmed.slice(1))
+      : normalizePath(dirname(file.path) === "." ? trimmed : `${dirname(file.path)}/${trimmed}`);
+    const parts = path.split("/").filter(Boolean);
+    if (!parts.length || parts.includes("..") || path.startsWith(".obsidian/") || path === ".obsidian" || path.startsWith(".git/") || path === ".git") {
+      throw new Error(`Invalid loom-output-file path: ${rawPath}`);
+    }
+    return path;
+  }
+
+  private async ensureVaultParentFolder(path: string): Promise<void> {
+    const folder = dirname(path);
+    if (!folder || folder === ".") {
+      return;
+    }
+
+    let current = "";
+    for (const part of folder.split("/").filter(Boolean)) {
+      current = current ? `${current}/${part}` : part;
+      if (!(await this.app.vault.adapter.exists(current))) {
+        await this.app.vault.adapter.mkdir(current);
+      }
+    }
+  }
+
+  private renderOutputFileText(result: loomStoredOutput["result"], target: loomOutputFileTarget): string {
+    const sections = target.streams.flatMap((stream) => {
+      switch (stream) {
+        case "metadata":
+          return [
+            `runner=${result.runnerName}`,
+            `exit=${result.exitCode ?? "?"}`,
+            `duration=${result.durationMs}ms`,
+            `timestamp=${result.finishedAt}`,
+          ].join("\n");
+        case "stdout":
+          return result.stdout ? [result.stdout] : [];
+        case "warning":
+          return result.warning ? [result.warning] : [];
+        case "stderr":
+          return result.stderr ? [result.stderr] : [];
+      }
+    });
+    return `${sections.join("\n\n").replace(/\s*$/, "")}\n`;
+  }
+
+  private renderOutputFileJson(file: TFile, block: loomCodeBlock, result: loomStoredOutput["result"], target: loomOutputFileTarget): string {
+    const payload = {
+      note: file.path,
+      blockId: block.id,
+      language: block.language,
+      runner: result.runnerName,
+      exitCode: result.exitCode,
+      success: result.success,
+      durationMs: result.durationMs,
+      startedAt: result.startedAt,
+      finishedAt: result.finishedAt,
+      streams: {
+        ...(target.streams.includes("stdout") ? { stdout: result.stdout } : {}),
+        ...(target.streams.includes("warning") ? { warning: result.warning ?? "" } : {}),
+        ...(target.streams.includes("stderr") ? { stderr: result.stderr } : {}),
+      },
+    };
+    return `${JSON.stringify(payload, null, 2)}\n`;
   }
 
   private async removeManagedOutputBlock(filePath: string, blockId: string): Promise<void> {

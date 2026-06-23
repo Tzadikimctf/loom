@@ -142,6 +142,7 @@ export interface loomPluginSettings {
   coqExecutable: string;
   smtExecutable: string;
   writeOutputToNote: boolean;
+  outputVisibleLines: number;
   autoRunOnFileOpen: boolean;
   extractedSourcePreviewMode: "collapsed" | "expanded" | "hidden";
   showLanguageCapabilityMetadata: boolean;

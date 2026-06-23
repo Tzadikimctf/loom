@@ -1,6 +1,10 @@
 import { setIcon } from "obsidian";
 import type { loomStoredOutput } from "../types";
 
+interface loomOutputPanelOptions {
+  defaultVisibleLines: number;
+}
+
 function getStatusKind(output: loomStoredOutput): "success" | "warning" | "failure" {
   if (output.result.success) {
     return output.result.stderr.trim() || output.result.warning?.trim() ? "warning" : "success";
@@ -9,18 +13,19 @@ function getStatusKind(output: loomStoredOutput): "success" | "warning" | "failu
   return "failure";
 }
 
-export function createOutputPanel(output: loomStoredOutput): HTMLDivElement {
+export function createOutputPanel(output: loomStoredOutput, options: loomOutputPanelOptions): HTMLDivElement {
   const panel = document.createElement("div");
   panel.className = `loom-output-panel is-${getStatusKind(output)}${output.visible ? "" : " is-hidden"}`;
   panel.dataset.loomBlockId = output.blockId;
-  renderOutputPanel(panel, output);
+  renderOutputPanel(panel, output, options);
   return panel;
 }
 
-export function renderOutputPanel(panel: HTMLElement, output: loomStoredOutput): void {
+export function renderOutputPanel(panel: HTMLElement, output: loomStoredOutput, options: loomOutputPanelOptions): void {
   const kind = getStatusKind(output);
   panel.className = `loom-output-panel is-${kind}${output.visible ? "" : " is-hidden"}${output.collapsed ? " is-collapsed" : ""}`;
   panel.empty();
+  const visibleLines = resolveVisibleLines(output, options.defaultVisibleLines);
 
   const header = panel.createDiv({ cls: "loom-output-header" });
   const badge = header.createDiv({ cls: "loom-output-badge" });
@@ -34,13 +39,13 @@ export function renderOutputPanel(panel: HTMLElement, output: loomStoredOutput):
 
   const body = panel.createDiv({ cls: "loom-output-body" });
   if (output.result.stdout.trim()) {
-    createStream(body, "Stdout", output.result.stdout);
+    createStream(body, "Stdout", output.result.stdout, visibleLines);
   }
   if (output.result.warning?.trim()) {
-    createStream(body, "Warning", output.result.warning);
+    createStream(body, "Warning", output.result.warning, visibleLines);
   }
   if (output.result.stderr.trim()) {
-    createStream(body, "Stderr", output.result.stderr);
+    createStream(body, "Stderr", output.result.stderr, visibleLines);
   }
   if (output.sourcePreview?.content.trim()) {
     createSourcePreview(body, output.sourcePreview);
@@ -51,10 +56,15 @@ export function renderOutputPanel(panel: HTMLElement, output: loomStoredOutput):
   }
 }
 
-function createStream(container: HTMLElement, label: string, content: string): void {
+function createStream(container: HTMLElement, label: string, content: string, visibleLines: number): void {
   const section = container.createDiv({ cls: "loom-output-stream" });
-  section.createDiv({ cls: "loom-output-stream-label", text: label });
-  section.createEl("pre", { cls: "loom-output-pre", text: content });
+  const lineCount = countLines(content);
+  section.createDiv({ cls: "loom-output-stream-label", text: formatStreamLabel(label, lineCount, visibleLines) });
+  const pre = section.createEl("pre", { cls: "loom-output-pre", text: content });
+  if (visibleLines > 0 && lineCount > visibleLines) {
+    pre.addClass("is-scroll-limited");
+    pre.style.setProperty("--loom-output-visible-lines", String(visibleLines));
+  }
 }
 
 function createSourcePreview(container: HTMLElement, preview: NonNullable<loomStoredOutput["sourcePreview"]>): void {
@@ -78,6 +88,32 @@ function formatSourcePreviewMeta(preview: NonNullable<loomStoredOutput["sourcePr
     `deps:${capability.dependencyTracing}`,
     `call:${capability.callHarness}`,
   ].join(" · ");
+}
+
+function resolveVisibleLines(output: loomStoredOutput, defaultVisibleLines: number): number {
+  const override = output.block.attributes["loom-output-lines"] ?? output.block.attributes["output-lines"];
+  if (override != null) {
+    return normalizeVisibleLines(Number.parseInt(override.trim(), 10));
+  }
+  return normalizeVisibleLines(defaultVisibleLines);
+}
+
+function normalizeVisibleLines(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  return Math.min(Math.floor(value), 2000);
+}
+
+function countLines(content: string): number {
+  return content.replace(/\n$/, "").split("\n").length;
+}
+
+function formatStreamLabel(label: string, lineCount: number, visibleLines: number): string {
+  if (visibleLines > 0 && lineCount > visibleLines) {
+    return `${label} · ${lineCount} lines · showing ${visibleLines}`;
+  }
+  return label;
 }
 
 export function createRunningPanel(): HTMLDivElement {

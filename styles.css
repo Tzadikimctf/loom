@@ -130,6 +130,11 @@
   line-height: 1.45;
 }
 
+.loom-output-pre.is-scroll-limited {
+  max-height: calc((var(--loom-output-visible-lines) * 1.45em) + 1.5rem);
+  overflow: auto;
+}
+
 .loom-output-empty {
   color: var(--text-muted);
   font-style: italic;

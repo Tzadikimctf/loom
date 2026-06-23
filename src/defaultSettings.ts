@@ -36,6 +36,7 @@ export const DEFAULT_SETTINGS: loomPluginSettings = {
   coqExecutable: "coqc",
   smtExecutable: "z3",
   writeOutputToNote: false,
+  outputVisibleLines: 0,
   autoRunOnFileOpen: false,
   extractedSourcePreviewMode: "collapsed",
   showLanguageCapabilityMetadata: true,
