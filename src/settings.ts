@@ -1,5 +1,15 @@
 import { App, Modal, Notice, PluginSettingTab, Setting, normalizePath } from "obsidian";
 import type loomPlugin from "./main";
+import {
+  getCompileContainerRuntimes,
+  getCompileProfileSummary,
+  hasCompileContainerGroupSelection,
+  isCompileContainerGroupAllowed,
+  isCompileCustomLanguagesAllowed,
+  isCompileExternalLanguagePacksAllowed,
+  isCompileFeatureAllowed,
+  isLightCompileMode,
+} from "./buildProfile";
 import { CUSTOM_LANGUAGE_PACKAGE_ID, getAvailableLanguagePackages, getDefaultLanguageIds, getDefaultLanguagePackIds, isLanguageEnabled, normalizeLanguageConfiguration } from "./languagePackages";
 import type { loomCustomLanguage, loomPluginSettings } from "./types";
 
@@ -19,8 +29,12 @@ export class loomSettingTab extends PluginSettingTab {
     this.renderGeneralSettings(this.createSection(containerEl, "General Settings", true));
     this.renderLanguagePackages(this.createSection(containerEl, "Language Packages"));
     this.renderBuiltInRuntimes(this.createSection(containerEl, "Built-in Runtimes"));
-    this.renderCustomLanguages(this.createSection(containerEl, "Custom Languages"));
-    void this.renderContainerGroups(this.createSection(containerEl, "Execution Groups"));
+    if (isCompileCustomLanguagesAllowed()) {
+      this.renderCustomLanguages(this.createSection(containerEl, "Custom Languages"));
+    }
+    if (isCompileFeatureAllowed("container-groups")) {
+      void this.renderContainerGroups(this.createSection(containerEl, "Execution Groups"));
+    }
   }
 
   private createSection(containerEl: HTMLElement, title: string, open = false): HTMLElement {
@@ -31,6 +45,12 @@ export class loomSettingTab extends PluginSettingTab {
   }
 
   private renderGeneralSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Compile profile")
+      .setDesc(isLightCompileMode()
+        ? `This build was compiled with ${getCompileProfileSummary()}.`
+        : "STRICT build. All Loom feature surfaces are available unless disabled in vault settings.");
+
     new Setting(containerEl)
       .setName("Enable local execution")
       .setDesc("Disabled by default. loom runs code on your local machine and does not provide sandboxing.")
@@ -111,6 +131,16 @@ export class loomSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.loomPlugin.settings.autoRunOnFileOpen).onChange(async (value) => {
           this.loomPlugin.settings.autoRunOnFileOpen = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Write code block hashes to frontmatter")
+      .setDesc("Maintain loom-code-block-hashes in note frontmatter when hashing notes or running blocks.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.hashCodeBlocks ?? false).onChange(async (value) => {
+          this.loomPlugin.settings.hashCodeBlocks = value;
           await this.loomPlugin.saveSettings();
         }),
       );
@@ -297,63 +327,67 @@ export class loomSettingTab extends PluginSettingTab {
       }
     }
 
-    new Setting(containerEl)
-      .setName("Reload external language packs")
-      .setDesc("Load JSON language pack manifests from the plugin language-packs folder.")
-      .addButton((button) =>
-        button.setButtonText("Reload").onClick(async () => {
-          await this.loomPlugin.loadExternalLanguagePacks(true);
+    if (isCompileExternalLanguagePacksAllowed()) {
+      new Setting(containerEl)
+        .setName("Reload external language packs")
+        .setDesc("Load JSON language pack manifests from the plugin language-packs folder.")
+        .addButton((button) =>
+          button.setButtonText("Reload").onClick(async () => {
+            await this.loomPlugin.loadExternalLanguagePacks(true);
+            await this.loomPlugin.saveSettings();
+            this.display();
+          }),
+        );
+
+      const bundleInput = containerEl.createEl("input", {
+        attr: {
+          type: "file",
+          accept: ".zip,.tar,.tgz,.tar.gz,application/zip,application/x-tar,application/gzip",
+        },
+      });
+      bundleInput.style.display = "none";
+      bundleInput.addEventListener("change", async () => {
+        const file = bundleInput.files?.[0];
+        if (!file) {
+          return;
+        }
+
+        try {
+          const result = await this.loomPlugin.importExternalLanguageBundle(file);
           await this.loomPlugin.saveSettings();
+          new Notice(`Imported language bundle ${result.packId} (${result.fileCount} files)`);
           this.display();
-        }),
-      );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          new Notice(`Failed to import language bundle: ${message}`);
+          console.warn("Failed to import loom language bundle", error);
+        } finally {
+          bundleInput.value = "";
+        }
+      });
 
-    const bundleInput = containerEl.createEl("input", {
-      attr: {
-        type: "file",
-        accept: ".zip,.tar,.tgz,.tar.gz,application/zip,application/x-tar,application/gzip",
-      },
-    });
-    bundleInput.style.display = "none";
-    bundleInput.addEventListener("change", async () => {
-      const file = bundleInput.files?.[0];
-      if (!file) {
-        return;
-      }
+      new Setting(containerEl)
+        .setName("Import language bundle")
+        .setDesc("Unpack a zip, tar, or tar.gz language bundle into the plugin language-packs folder.")
+        .addButton((button) =>
+          button.setButtonText("Import").onClick(() => {
+            bundleInput.click();
+          }),
+        );
+    }
 
-      try {
-        const result = await this.loomPlugin.importExternalLanguageBundle(file);
-        await this.loomPlugin.saveSettings();
-        new Notice(`Imported language bundle ${result.packId} (${result.fileCount} files)`);
-        this.display();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        new Notice(`Failed to import language bundle: ${message}`);
-        console.warn("Failed to import loom language bundle", error);
-      } finally {
-        bundleInput.value = "";
-      }
-    });
-
-    new Setting(containerEl)
-      .setName("Import language bundle")
-      .setDesc("Unpack a zip, tar, or tar.gz language bundle into the plugin language-packs folder.")
-      .addButton((button) =>
-        button.setButtonText("Import").onClick(() => {
-          bundleInput.click();
-        }),
-      );
-
-    new Setting(containerEl)
-      .setName("Custom languages")
-      .setDesc("Enable user-defined languages from the Custom Languages section.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.loomPlugin.settings.enabledLanguagePacks.includes(CUSTOM_LANGUAGE_PACKAGE_ID)).onChange(async (value) => {
-          this.setEnabledValue(this.loomPlugin.settings.enabledLanguagePacks, CUSTOM_LANGUAGE_PACKAGE_ID, value);
-          await this.loomPlugin.saveSettings();
-          this.display();
-        }),
-      );
+    if (isCompileCustomLanguagesAllowed()) {
+      new Setting(containerEl)
+        .setName("Custom languages")
+        .setDesc("Enable user-defined languages from the Custom Languages section.")
+        .addToggle((toggle) =>
+          toggle.setValue(this.loomPlugin.settings.enabledLanguagePacks.includes(CUSTOM_LANGUAGE_PACKAGE_ID)).onChange(async (value) => {
+            this.setEnabledValue(this.loomPlugin.settings.enabledLanguagePacks, CUSTOM_LANGUAGE_PACKAGE_ID, value);
+            await this.loomPlugin.saveSettings();
+            this.display();
+          }),
+        );
+    }
 
     new Setting(containerEl)
       .setName("Reset language packages")
@@ -460,8 +494,13 @@ export class loomSettingTab extends PluginSettingTab {
   }
 
   private async renderContainerGroups(containerEl: HTMLElement): Promise<void> {
+    if (!isCompileFeatureAllowed("container-groups")) {
+      return;
+    }
+
     try {
-      const groups = await this.loomPlugin.getContainerGroupSummaries();
+      const groups = (await this.loomPlugin.getContainerGroupSummaries())
+        .filter((group) => isCompileContainerGroupAllowed(group.name));
 
       new Setting(containerEl)
         .setName("Default execution group")
@@ -478,48 +517,50 @@ export class loomSettingTab extends PluginSettingTab {
           });
         });
 
-      new Setting(containerEl)
-        .setName("Add new execution group")
-        .setDesc("Create a new execution group configuration folder.")
-        .addButton((button) =>
-          button.setButtonText("+").onClick(() => {
-            new ContainerGroupNameModal(this.app, async (groupName) => {
-              const cleanName = groupName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-              if (!cleanName) {
-                new Notice("Invalid group name.");
-                return;
-              }
-
-              const pluginDir = this.loomPlugin.manifest.dir ?? ".obsidian/plugins/loom";
-              const groupRelativePath = `${pluginDir}/containers/${cleanName}`;
-              const configPath = `${groupRelativePath}/config.json`;
-
-              const adapter = this.app.vault.adapter;
-              if (await adapter.exists(groupRelativePath)) {
-                new Notice("Execution group folder already exists.");
-                return;
-              }
-
-              await adapter.mkdir(groupRelativePath);
-              const defaultConfig = {
-                runtime: "docker",
-                image: "ubuntu:latest",
-                elevation: {
-                  mode: "default"
-                },
-                languages: {
-                  python: {
-                    command: "python3 {file}",
-                    extension: ".py"
-                  }
+      if (!hasCompileContainerGroupSelection()) {
+        new Setting(containerEl)
+          .setName("Add new execution group")
+          .setDesc("Create a new execution group configuration folder.")
+          .addButton((button) =>
+            button.setButtonText("+").onClick(() => {
+              new ContainerGroupNameModal(this.app, async (groupName) => {
+                const cleanName = groupName.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+                if (!cleanName) {
+                  new Notice("Invalid group name.");
+                  return;
                 }
-              };
-              await adapter.write(configPath, JSON.stringify(defaultConfig, null, 2));
-              new Notice(`Execution group "${cleanName}" created.`);
-              this.display();
-            }).open();
-          }),
-        );
+
+                const pluginDir = this.loomPlugin.manifest.dir ?? ".obsidian/plugins/loom";
+                const groupRelativePath = `${pluginDir}/containers/${cleanName}`;
+                const configPath = `${groupRelativePath}/config.json`;
+
+                const adapter = this.app.vault.adapter;
+                if (await adapter.exists(groupRelativePath)) {
+                  new Notice("Execution group folder already exists.");
+                  return;
+                }
+
+                await adapter.mkdir(groupRelativePath);
+                const defaultConfig = {
+                  runtime: "docker",
+                  image: "ubuntu:latest",
+                  elevation: {
+                    mode: "default"
+                  },
+                  languages: {
+                    python: {
+                      command: "python3 {file}",
+                      extension: ".py"
+                    }
+                  }
+                };
+                await adapter.write(configPath, JSON.stringify(defaultConfig, null, 2));
+                new Notice(`Execution group "${cleanName}" created.`);
+                this.display();
+              }).open();
+            }),
+          );
+      }
 
       const listEl = containerEl.createDiv({ cls: "loom-container-group-list" });
       if (!groups.length) {
@@ -751,14 +792,22 @@ class EditContainerGroupModal extends Modal {
       .setName("Runtime")
       .setDesc("Choose the container/environment manager runtime.")
       .addDropdown((dropdown) => {
+        const runtimeLabels: Record<string, string> = {
+          docker: "Docker",
+          podman: "Podman",
+          wsl: "WSL",
+          ssh: "SSH Remote",
+          qemu: "QEMU",
+          custom: "Custom",
+        };
+        const allowedRuntimes = getCompileContainerRuntimes();
+        for (const runtime of allowedRuntimes) {
+          dropdown.addOption(runtime, runtimeLabels[runtime]);
+        }
+        const selectedRuntime = allowedRuntimes.includes(this.configObj.runtime) ? this.configObj.runtime : allowedRuntimes[0] ?? "docker";
+        this.configObj.runtime = selectedRuntime;
         dropdown
-          .addOption("docker", "Docker")
-          .addOption("podman", "Podman")
-          .addOption("wsl", "WSL")
-          .addOption("ssh", "SSH Remote")
-          .addOption("qemu", "QEMU")
-          .addOption("custom", "Custom")
-          .setValue(this.configObj.runtime || "docker")
+          .setValue(selectedRuntime)
           .onChange((value) => {
             this.configObj.runtime = value;
             this.renderActiveTab();
@@ -927,7 +976,9 @@ class EditContainerGroupModal extends Modal {
       this.renderRemoteTransportSettings(containerEl, this.configObj.qemu, false);
     }
 
-    this.renderOutputFilters(containerEl);
+    if (isCompileFeatureAllowed("output-filters")) {
+      this.renderOutputFilters(containerEl);
+    }
 
     // Conditional Custom Settings
     if (this.configObj.runtime === "custom") {

@@ -145,6 +145,7 @@ export interface loomPluginSettings {
   writeOutputToNote: boolean;
   outputVisibleLines: number;
   autoRunOnFileOpen: boolean;
+  hashCodeBlocks: boolean;
   showObsidianContextWarning: boolean;
   extractedSourcePreviewMode: "collapsed" | "expanded" | "hidden";
   showLanguageCapabilityMetadata: boolean;

@@ -4,7 +4,21 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 
-const prod = (process.argv[2] === "production");
+const buildArgs = process.argv.slice(2);
+const prod = buildArgs.includes("production") || readFlag("production");
+const compileMode = normalizeCompileMode(
+  readOption("compile-mode")
+  ?? readOption("compile")
+  ?? readOption("mode")
+  ?? process.env.LOOM_COMPILE_MODE
+  ?? process.env.LOOM_COMPILE
+  ?? (readFlag("light") ? "light" : readFlag("strict") ? "strict" : "strict"),
+);
+const lightLanguages = readListOption("languages", "LOOM_LIGHT_LANGUAGES");
+const lightLanguagePacks = readListOption("language-packs", "LOOM_LIGHT_LANGUAGE_PACKS");
+const lightFeatures = readListOption("features", "LOOM_LIGHT_FEATURES");
+const lightContainerGroups = readListOption("container-groups", "LOOM_LIGHT_CONTAINER_GROUPS");
+const lightContainerRuntimes = readListOption("container-runtimes", "LOOM_LIGHT_CONTAINER_RUNTIMES");
 const pluginName = "loom";
 const explicitDeployDirs = [
   ...(process.env.LOOM_PLUGIN_DIRS ?? "")
@@ -12,6 +26,8 @@ const explicitDeployDirs = [
     .map((value) => value.trim())
     .filter(Boolean)
 ];
+
+console.log(`Building loom compile profile: ${formatCompileProfile()}`);
 
 await esbuild.build({
   entryPoints: ["src/main.ts"],
@@ -30,6 +46,14 @@ await esbuild.build({
     "@codemirror/view",
     "@codemirror/language",
   ],
+  define: {
+    __LOOM_COMPILE_MODE__: JSON.stringify(compileMode),
+    __LOOM_LIGHT_LANGUAGES__: JSON.stringify(lightLanguages),
+    __LOOM_LIGHT_LANGUAGE_PACKS__: JSON.stringify(lightLanguagePacks),
+    __LOOM_LIGHT_FEATURES__: JSON.stringify(lightFeatures),
+    __LOOM_LIGHT_CONTAINER_GROUPS__: JSON.stringify(lightContainerGroups),
+    __LOOM_LIGHT_CONTAINER_RUNTIMES__: JSON.stringify(lightContainerRuntimes),
+  },
   logLevel: "info",
 });
 
@@ -106,4 +130,52 @@ function copyDirectoryIfPresent(sourceDir, destinationDir) {
     }
     fs.copyFileSync(sourcePath, destinationPath);
   }
+}
+
+function readOption(name) {
+  const prefix = `--${name}=`;
+  const inline = buildArgs.find((arg) => arg.startsWith(prefix));
+  if (inline) {
+    return inline.slice(prefix.length);
+  }
+
+  const index = buildArgs.indexOf(`--${name}`);
+  if (index >= 0 && buildArgs[index + 1] && !buildArgs[index + 1].startsWith("--")) {
+    return buildArgs[index + 1];
+  }
+  return undefined;
+}
+
+function readFlag(name) {
+  return buildArgs.includes(`--${name}`);
+}
+
+function readListOption(name, envName) {
+  return normalizeList(readOption(name) ?? process.env[envName] ?? "");
+}
+
+function normalizeCompileMode(value) {
+  return String(value ?? "").trim().toLowerCase() === "light" ? "light" : "strict";
+}
+
+function normalizeList(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+    .filter((entry, index, entries) => entries.indexOf(entry) === index);
+}
+
+function formatCompileProfile() {
+  if (compileMode === "strict") {
+    return "STRICT";
+  }
+  return [
+    "LIGHT",
+    `languages=${lightLanguages.length ? lightLanguages.join(",") : "all"}`,
+    `language-packs=${lightLanguagePacks.length ? lightLanguagePacks.join(",") : "all"}`,
+    `features=${lightFeatures.length ? lightFeatures.join(",") : "all"}`,
+    `container-groups=${lightContainerGroups.length ? lightContainerGroups.join(",") : "all"}`,
+    `container-runtimes=${lightContainerRuntimes.length ? lightContainerRuntimes.join(",") : "all"}`,
+  ].join("; ");
 }

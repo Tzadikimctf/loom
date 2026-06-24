@@ -1,3 +1,9 @@
+import {
+  isCompileCustomLanguagesAllowed,
+  isCompileExternalLanguagePacksAllowed,
+  isCompileLanguageAllowed,
+  isCompileLanguagePackageAllowed,
+} from "./buildProfile";
 import type { loomCustomLanguage, loomNormalizedLanguage, loomPluginSettings } from "./types";
 
 export interface loomLanguageDefinition {
@@ -91,11 +97,14 @@ export const CUSTOM_LANGUAGE_PACKAGE_ID = "custom";
 export const LANGUAGE_CONFIGURATION_VERSION = 3;
 
 export function getDefaultLanguagePackIds(): string[] {
-  return [...BUILT_IN_LANGUAGE_PACKAGES.map((pack) => pack.id), CUSTOM_LANGUAGE_PACKAGE_ID];
+  return [
+    ...getCompileAllowedBuiltInLanguagePackages().map((pack) => pack.id),
+    ...(isCompileCustomLanguagesAllowed() ? [CUSTOM_LANGUAGE_PACKAGE_ID] : []),
+  ];
 }
 
 export function getDefaultLanguageIds(): string[] {
-  return BUILT_IN_LANGUAGE_PACKAGES.flatMap((pack) => pack.languages.map((language) => language.id));
+  return getCompileAllowedBuiltInLanguagePackages().flatMap((pack) => pack.languages.map((language) => language.id));
 }
 
 export function normalizeLanguageConfiguration(settings: loomPluginSettings): void {
@@ -118,6 +127,7 @@ export function normalizeLanguageConfiguration(settings: loomPluginSettings): vo
     enableLanguagePackage(settings, "obsidian-context");
   }
   settings.languageConfigurationVersion = LANGUAGE_CONFIGURATION_VERSION;
+  filterDisallowedCompileSelections(settings);
 }
 
 function enableLanguagePackage(settings: loomPluginSettings, packageId: string): void {
@@ -137,6 +147,40 @@ function appendUnique(values: string[], value: string): void {
   }
 }
 
+function getCompileAllowedBuiltInLanguagePackages(): loomLanguagePackage[] {
+  return BUILT_IN_LANGUAGE_PACKAGES
+    .filter((pack) => isCompileLanguagePackageAllowed(pack.id))
+    .map((pack) => ({
+      ...pack,
+      languages: pack.languages.filter((language) => isCompileLanguageAllowed(language.id)),
+    }))
+    .filter((pack) => pack.languages.length > 0);
+}
+
+function filterDisallowedCompileSelections(settings: loomPluginSettings): void {
+  const allowedPackIds = new Set([
+    ...getCompileAllowedBuiltInLanguagePackages().map((pack) => pack.id),
+    ...(isCompileExternalLanguagePacksAllowed() ? settings.externalLanguagePacks.map((pack) => pack.id).filter((packId) => isCompileLanguagePackageAllowed(packId)) : []),
+    ...(isCompileCustomLanguagesAllowed() ? [CUSTOM_LANGUAGE_PACKAGE_ID] : []),
+  ]);
+  const allowedLanguageIds = new Set([
+    ...getDefaultLanguageIds(),
+    ...(isCompileExternalLanguagePacksAllowed()
+      ? settings.externalLanguagePacks.flatMap((pack) => pack.languages.map((language) => language.name).filter((name) => isCompileLanguageAllowed(name)))
+      : []),
+  ]);
+
+  settings.enabledLanguagePacks = settings.enabledLanguagePacks.filter((packId) => allowedPackIds.has(packId));
+  settings.enabledLanguages = settings.enabledLanguages.filter((languageId) => allowedLanguageIds.has(languageId));
+
+  if (!settings.enabledLanguagePacks.length) {
+    settings.enabledLanguagePacks = getDefaultLanguagePackIds();
+  }
+  if (!settings.enabledLanguages.length) {
+    settings.enabledLanguages = getDefaultLanguageIds();
+  }
+}
+
 export function getEnabledLanguageDefinitions(settings: loomPluginSettings): loomLanguageDefinition[] {
   normalizeLanguageConfiguration(settings);
   const enabledPacks = new Set(settings.enabledLanguagePacks);
@@ -151,8 +195,8 @@ export function getEnabledLanguageDefinitions(settings: loomPluginSettings): loo
 export function getAvailableLanguagePackages(settings: loomPluginSettings): loomLanguagePackage[] {
   normalizeLanguageConfiguration(settings);
   return [
-    ...BUILT_IN_LANGUAGE_PACKAGES,
-    ...(settings.externalLanguagePacks ?? []).map((pack) => ({
+    ...getCompileAllowedBuiltInLanguagePackages(),
+    ...(isCompileExternalLanguagePacksAllowed() ? settings.externalLanguagePacks ?? [] : []).filter((pack) => isCompileLanguagePackageAllowed(pack.id)).map((pack) => ({
       id: pack.id,
       displayName: pack.displayName,
       description: pack.description,
@@ -160,8 +204,8 @@ export function getAvailableLanguagePackages(settings: loomPluginSettings): loom
         id: language.name,
         displayName: language.displayName || language.name,
         aliases: parseAliasList(language.aliases),
-      })),
-    })),
+      })).filter((language) => isCompileLanguageAllowed(language.id)),
+    })).filter((pack) => pack.languages.length > 0),
   ];
 }
 
@@ -180,7 +224,7 @@ export function isLanguageEnabled(languageId: loomNormalizedLanguage, settings: 
 
 export function areCustomLanguagesEnabled(settings: loomPluginSettings): boolean {
   normalizeLanguageConfiguration(settings);
-  return settings.enabledLanguagePacks.includes(CUSTOM_LANGUAGE_PACKAGE_ID);
+  return isCompileCustomLanguagesAllowed() && settings.enabledLanguagePacks.includes(CUSTOM_LANGUAGE_PACKAGE_ID);
 }
 
 export function getEnabledCommandLanguages(settings: loomPluginSettings): loomCustomLanguage[] {
@@ -188,10 +232,10 @@ export function getEnabledCommandLanguages(settings: loomPluginSettings): loomCu
   const enabledPacks = new Set(settings.enabledLanguagePacks);
   const enabledLanguages = new Set(settings.enabledLanguages);
   const customLanguages = areCustomLanguagesEnabled(settings) ? settings.customLanguages ?? [] : [];
-  const externalLanguages = (settings.externalLanguagePacks ?? [])
+  const externalLanguages = (isCompileExternalLanguagePacksAllowed() ? settings.externalLanguagePacks ?? [] : [])
     .filter((pack) => enabledPacks.has(pack.id))
     .flatMap((pack) => pack.languages)
-    .filter((language) => enabledLanguages.has(language.name));
+    .filter((language) => enabledLanguages.has(language.name) && isCompileLanguageAllowed(language.name));
 
   return [...customLanguages, ...externalLanguages];
 }
