@@ -47,6 +47,6 @@ export const DEFAULT_SETTINGS: loomPluginSettings = {
   enabledLanguages: getDefaultLanguageIds(),
   externalLanguagePacks: [],
   customLanguages: [],
-  pdfExportMode: "both",
+  pdfExportMode: "code",
   defaultContainerGroup: "",
 };

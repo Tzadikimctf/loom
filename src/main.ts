@@ -10,6 +10,7 @@ import {
   normalizePath,
   parseYaml,
   type DataAdapter,
+  type MarkdownPostProcessorContext,
 } from "obsidian";
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, ViewUpdate, WidgetType } from "@codemirror/view";
@@ -18,8 +19,8 @@ import { dirname } from "path";
 import { loomContainerRunner } from "./execution/containerRunner";
 import { isCompileContainerGroupAllowed, isCompileFeatureAllowed } from "./buildProfile";
 import { resolveExecutionContext as resolveLoomExecutionContext } from "./executionContext";
-import { addLlvmDecorations, highlightLlvmElement } from "./llvmHighlight";
-import { findBlockAtLine, getSupportedLanguageAliases, parseMarkdownCodeBlocks } from "./parser";
+import { addLlvmDecorations } from "./llvmHighlight";
+import { findBlockAtLine, normalizeLanguage, parseMarkdownCodeBlocks } from "./parser";
 import { getLanguageCapability } from "./languageCapabilities";
 import { findEnabledCommandLanguage, normalizeLanguageConfiguration } from "./languagePackages";
 import { NodeRunner } from "./runners/node";
@@ -55,6 +56,7 @@ const HASH_POLICY_FRONTMATTER_KEY = "loom-hash-policy";
 const HASH_IGNORE_FRONTMATTER_KEY = "loom-hash-ignore-frontmatter";
 const HASH_IGNORE_BLOCK_ATTRIBUTES_KEY = "loom-hash-ignore-block-attributes";
 const REPRODUCIBILITY_SNAPSHOT_VERSION = 1;
+const SUPPORTED_PDF_EXPORT_MODES = new Set<loomPluginSettings["pdfExportMode"]>(["both", "code", "output"]);
 type loomOutputFileMode = "replace" | "append";
 type loomOutputFileFormat = "text" | "json";
 type loomOutputFileStream = "stdout" | "stderr" | "warning" | "metadata";
@@ -241,6 +243,7 @@ class ReproducibilityPolicyModal extends Modal {
 
 class loomToolbarRenderChild extends MarkdownRenderChild {
   private panelContainer: HTMLDivElement | null = null;
+  private toolbarElement: HTMLElement | null = null;
   private unregisterOutputListener: (() => void) | null = null;
 
   constructor(
@@ -253,8 +256,9 @@ class loomToolbarRenderChild extends MarkdownRenderChild {
   }
 
   onload(): void {
-    this.codeElement.parentElement?.addClass("loom-codeblock-shell");
-    this.codeElement.parentElement?.appendChild(this.plugin.createToolbarElement(this.block));
+    this.codeElement.classList.add("loom-codeblock-shell");
+    this.toolbarElement = this.plugin.createToolbarElement(this.block);
+    this.codeElement.appendChild(this.toolbarElement);
 
     if (this.plugin.settings.pdfExportMode === "output") {
       this.codeElement.classList.add("loom-print-hide-code");
@@ -264,7 +268,9 @@ class loomToolbarRenderChild extends MarkdownRenderChild {
     if (this.plugin.settings.pdfExportMode === "code") {
       hostClasses.push("loom-print-hide-output");
     }
-    this.panelContainer = this.containerEl.createDiv({ cls: hostClasses.join(" ") });
+    this.panelContainer = document.createElement("div");
+    this.panelContainer.className = hostClasses.join(" ");
+    this.codeElement.insertAdjacentElement("afterend", this.panelContainer);
 
     this.plugin.renderOutputInto(this.block, this.panelContainer);
     this.unregisterOutputListener = this.plugin.registerOutputListener(this.block.id, () => {
@@ -276,6 +282,8 @@ class loomToolbarRenderChild extends MarkdownRenderChild {
 
   onunload(): void {
     this.unregisterOutputListener?.();
+    this.panelContainer?.remove();
+    this.toolbarElement?.remove();
   }
 }
 
@@ -336,7 +344,7 @@ export default class loomPlugin extends Plugin {
   ]);
   // Exposed as public and readonly so the settings panel and modals can access container configurations and default language mapping helpers.
   public readonly containerRunner = new loomContainerRunner(this.app, this.manifest.dir ?? ".obsidian/plugins/loom");
-  private readonly registeredCodeBlockAliases = new Set<string>();
+  private hasRegisteredMarkdownDecorator = false;
   private readonly outputs = new Map<string, loomStoredOutput>();
   private readonly stdinInputs = new Map<string, string>();
   private readonly stdinPanels = new Set<string>();
@@ -1463,55 +1471,103 @@ export default class loomPlugin extends Plugin {
   }
 
   registerCodeBlockProcessors(): void {
-    for (const alias of getSupportedLanguageAliases(this.settings)) {
-      const normalizedAlias = alias.toLowerCase();
-      if (this.registeredCodeBlockAliases.has(normalizedAlias)) {
-        continue;
-      }
-
-      if (/[^a-zA-Z0-9_-]/.test(normalizedAlias)) {
-        continue;
-      }
-
-      this.registeredCodeBlockAliases.add(normalizedAlias);
-      this.registerMarkdownCodeBlockProcessor(normalizedAlias, async (source, el, ctx) => {
-        const filePath = ctx.sourcePath;
-        const file = this.app.vault.getAbstractFileByPath(filePath);
-        if (!(file instanceof TFile)) {
-          return;
-        }
-
-        const fullText = await this.app.vault.cachedRead(file);
-        const blocks = parseMarkdownCodeBlocks(filePath, fullText, this.settings);
-        const section = (ctx && typeof ctx.getSectionInfo === "function") ? ctx.getSectionInfo(el) : null;
-        let block: loomCodeBlock | undefined;
-        if (section) {
-          const lineStart = section.lineStart;
-          block = blocks.find((candidate) => candidate.startLine === lineStart && candidate.content === source);
-        } else {
-          block = blocks.find((candidate) => candidate.content === source);
-        }
-        if (!block) {
-          return;
-        }
-
-        let pre = el.querySelector("pre") as HTMLElement | null;
-        if (!pre) {
-          pre = el.createEl("pre");
-          pre.addClass(`language-${normalizedAlias}`);
-          const code = pre.createEl("code");
-          code.addClass(`language-${normalizedAlias}`);
-          code.setText(source);
-        }
-
-        if (block.language === "llvm-ir") {
-          const code = (pre.querySelector("code") as HTMLElement | null) ?? pre;
-          highlightLlvmElement(code, source);
-        }
-
-        ctx.addChild(new loomToolbarRenderChild(el, this, block, pre));
-      });
+    if (this.hasRegisteredMarkdownDecorator) {
+      return;
     }
+
+    this.hasRegisteredMarkdownDecorator = true;
+    this.registerMarkdownPostProcessor(async (el, ctx) => {
+      await this.decorateRenderedCodeBlocks(el, ctx);
+    });
+  }
+
+  private async decorateRenderedCodeBlocks(el: HTMLElement, ctx: MarkdownPostProcessorContext): Promise<void> {
+    const filePath = ctx.sourcePath;
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (!(file instanceof TFile)) {
+      return;
+    }
+
+    const codeElements = getRenderedCodeElements(el);
+    if (!codeElements.length) {
+      return;
+    }
+
+    const fullText = await this.app.vault.cachedRead(file);
+    const blocks = parseMarkdownCodeBlocks(filePath, fullText, this.settings);
+    if (!blocks.length) {
+      return;
+    }
+
+    const usedBlockIds = new Set<string>();
+    for (const code of codeElements) {
+      const pre = code.parentElement;
+      if (!(pre instanceof HTMLElement) || pre.dataset.loomDecorated === "true") {
+        continue;
+      }
+
+      const block = this.findRenderedCodeBlock(blocks, code, pre, ctx, usedBlockIds);
+      if (!block) {
+        continue;
+      }
+
+      usedBlockIds.add(block.id);
+      pre.dataset.loomDecorated = "true";
+      ctx.addChild(new loomToolbarRenderChild(pre, this, block, pre));
+    }
+  }
+
+  private findRenderedCodeBlock(
+    blocks: loomCodeBlock[],
+    code: HTMLElement,
+    pre: HTMLElement,
+    ctx: MarkdownPostProcessorContext,
+    usedBlockIds: Set<string>,
+  ): loomCodeBlock | null {
+    const renderedLanguage = this.getRenderedCodeLanguage(code, pre);
+    const renderedSource = code.textContent ?? "";
+    const candidates = blocks.filter((block) =>
+      !usedBlockIds.has(block.id) &&
+      this.renderedLanguageMatchesBlock(renderedLanguage, block) &&
+      renderedCodeMatchesBlock(renderedSource, block.content),
+    );
+    if (!candidates.length) {
+      return null;
+    }
+
+    const section = ctx.getSectionInfo(pre) ?? ctx.getSectionInfo(code);
+    if (section) {
+      return candidates.find((block) => block.startLine === section.lineStart)
+        ?? candidates.find((block) => block.startLine >= section.lineStart && block.endLine <= section.lineEnd)
+        ?? candidates[0];
+    }
+
+    return candidates[0];
+  }
+
+  private getRenderedCodeLanguage(code: HTMLElement, pre: HTMLElement): string | null {
+    for (const element of [code, pre]) {
+      for (const className of Array.from(element.classList)) {
+        const match = className.match(/^language-(.+)$/i);
+        if (match) {
+          return match[1].trim().toLowerCase();
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private renderedLanguageMatchesBlock(renderedLanguage: string | null, block: loomCodeBlock): boolean {
+    if (!renderedLanguage) {
+      return true;
+    }
+
+    const normalizedRenderedLanguage = normalizeLanguage(renderedLanguage, this.settings);
+    return renderedLanguage === block.sourceLanguage.toLowerCase()
+      || renderedLanguage === block.languageAlias
+      || renderedLanguage === block.language
+      || normalizedRenderedLanguage === block.language;
   }
 
   private updateStatusBar(): void {
@@ -1550,6 +1606,9 @@ export default class loomPlugin extends Plugin {
     this.settings.defaultTimeoutMs = normalizePositiveInteger(this.settings.defaultTimeoutMs, DEFAULT_SETTINGS.defaultTimeoutMs);
     this.settings.hashCodeBlocks = this.settings.hashCodeBlocks ?? DEFAULT_SETTINGS.hashCodeBlocks;
     this.settings.showObsidianContextWarning = this.settings.showObsidianContextWarning ?? DEFAULT_SETTINGS.showObsidianContextWarning;
+    if (!SUPPORTED_PDF_EXPORT_MODES.has(this.settings.pdfExportMode)) {
+      this.settings.pdfExportMode = DEFAULT_SETTINGS.pdfExportMode;
+    }
     this.settings.defaultContainerGroup = isCompileFeatureAllowed("container-groups")
       ? normalizeStringSetting(this.settings.defaultContainerGroup, DEFAULT_SETTINGS.defaultContainerGroup)
       : "";
@@ -2622,6 +2681,35 @@ function sameStringSet(left: string[], right: string[]): boolean {
   }
   const rightSet = new Set(right);
   return left.every((value) => rightSet.has(value));
+}
+
+function getRenderedCodeElements(root: HTMLElement): HTMLElement[] {
+  const elements: HTMLElement[] = [];
+  if (root.matches("pre > code")) {
+    elements.push(root);
+  } else if (root.matches("pre")) {
+    const code = root.querySelector(":scope > code");
+    if (code instanceof HTMLElement) {
+      elements.push(code);
+    }
+  }
+
+  elements.push(...Array.from(root.querySelectorAll("pre > code")) as HTMLElement[]);
+  return [...new Set(elements)];
+}
+
+function renderedCodeMatchesBlock(renderedSource: string, blockSource: string): boolean {
+  const renderedVariants = codeTextVariants(renderedSource);
+  const blockVariants = codeTextVariants(blockSource);
+  return renderedVariants.some((rendered) => blockVariants.includes(rendered));
+}
+
+function codeTextVariants(value: string): string[] {
+  const normalized = value.replace(/\r\n?/g, "\n");
+  const withoutSingleTrailingNewline = normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized;
+  return normalized === withoutSingleTrailingNewline
+    ? [normalized]
+    : [normalized, withoutSingleTrailingNewline];
 }
 
 function canonicalizeFenceInfoForHash(source: string, policy: loomHashPolicy): string {

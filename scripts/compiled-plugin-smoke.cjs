@@ -93,6 +93,7 @@ function obsidianShim(dir) {
     registerEditorExtension() {}
     registerEvent() {}
     registerMarkdownCodeBlockProcessor() {}
+    registerMarkdownPostProcessor() {}
     saveData() { return Promise.resolve(); }
   }
 

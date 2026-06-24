@@ -185,10 +185,10 @@ export class loomSettingTab extends PluginSettingTab {
       .setDesc("Choose what to include when exporting notes containing loom code blocks to PDF.")
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("both", "Both Code and Output")
           .addOption("code", "Code Block Only")
+          .addOption("both", "Both Code and Output")
           .addOption("output", "Output Only")
-          .setValue(this.loomPlugin.settings.pdfExportMode || "both")
+          .setValue(this.loomPlugin.settings.pdfExportMode || "code")
           .onChange(async (value) => {
             this.loomPlugin.settings.pdfExportMode = value as "both" | "code" | "output";
             await this.loomPlugin.saveSettings();

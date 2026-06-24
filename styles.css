@@ -15,6 +15,8 @@
   background: color-mix(in srgb, var(--background-primary) 88%, transparent);
   backdrop-filter: blur(10px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  font-family: var(--font-interface);
+  white-space: normal;
 }
 
 .loom-toolbar-button {
@@ -365,7 +367,9 @@
 }
 
 @media print {
-  .loom-code-toolbar {
+  .loom-code-toolbar,
+  .loom-stdin-panel,
+  .loom-inline-output-host:empty {
     display: none !important;
   }
   .loom-output-panel {
