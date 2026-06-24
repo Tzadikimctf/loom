@@ -4,9 +4,11 @@ import {
   Modal,
   Notice,
   Plugin,
+  Setting,
   TFile,
   WorkspaceLeaf,
   normalizePath,
+  parseYaml,
   type DataAdapter,
 } from "obsidian";
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
@@ -14,7 +16,8 @@ import { Decoration, EditorView, ViewPlugin, ViewUpdate, WidgetType } from "@cod
 import JSZip from "jszip";
 import { dirname } from "path";
 import { loomContainerRunner } from "./execution/containerRunner";
-import { resolveExecutionContext } from "./executionContext";
+import { isCompileContainerGroupAllowed, isCompileFeatureAllowed } from "./buildProfile";
+import { resolveExecutionContext as resolveLoomExecutionContext } from "./executionContext";
 import { addLlvmDecorations, highlightLlvmElement } from "./llvmHighlight";
 import { findBlockAtLine, getSupportedLanguageAliases, parseMarkdownCodeBlocks } from "./parser";
 import { getLanguageCapability } from "./languageCapabilities";
@@ -38,14 +41,75 @@ import { buildSourceReferenceHarness } from "./sourceHarness";
 import { createCodeBlockToolbar } from "./ui/codeBlockToolbar";
 import { createOutputPanel, createRunningPanel } from "./ui/outputPanel";
 import { splitCommandLine } from "./utils/command";
+import { sha256Hash } from "./utils/hash";
 import type { loomCodeBlock, loomExternalLanguage, loomExternalLanguagePack, loomPluginSettings, loomResolvedExecutionContext, loomStoredOutput } from "./types";
 
 const loomRefreshEffect = StateEffect.define<void>();
 const EXTERNAL_LANGUAGE_PACK_DIR = "language-packs";
 const LANGUAGE_PACK_MANIFEST_NAMES = new Set(["loom-language-pack.json", "language-pack.json", "manifest.json"]);
+const NOTE_HASH_FRONTMATTER_KEY = "loom-note-hash";
+const CODE_BLOCK_HASHES_FRONTMATTER_KEY = "loom-code-block-hashes";
+const LOOM_HASH_FRONTMATTER_KEYS = new Set([NOTE_HASH_FRONTMATTER_KEY, CODE_BLOCK_HASHES_FRONTMATTER_KEY]);
+const REPRODUCIBILITY_FRONTMATTER_KEY = "loom-reproducibility";
+const HASH_POLICY_FRONTMATTER_KEY = "loom-hash-policy";
+const HASH_IGNORE_FRONTMATTER_KEY = "loom-hash-ignore-frontmatter";
+const HASH_IGNORE_BLOCK_ATTRIBUTES_KEY = "loom-hash-ignore-block-attributes";
+const REPRODUCIBILITY_SNAPSHOT_VERSION = 1;
 type loomOutputFileMode = "replace" | "append";
 type loomOutputFileFormat = "text" | "json";
 type loomOutputFileStream = "stdout" | "stderr" | "warning" | "metadata";
+type loomHashPolicyPreset = "strict" | "runtime-flexible" | "runtime-inputs" | "runtime-inputs-outputs" | "custom";
+type loomReproducibilityStatus = "verified" | "changed" | "missing-snapshot";
+
+interface loomHashPolicy {
+  preset: loomHashPolicyPreset;
+  ignoreFrontmatter: string[];
+  ignoreBlockAttributes: string[];
+}
+
+interface loomHashPolicyPresetDefinition {
+  id: Exclude<loomHashPolicyPreset, "custom">;
+  label: string;
+  description: string;
+  ignoreFrontmatter: string[];
+  ignoreBlockAttributes: string[];
+}
+
+interface loomCodeBlockHashEntry {
+  id: string;
+  ordinal: number;
+  language: string;
+  alias: string;
+  hash: string;
+  startLine: number;
+  endLine: number;
+}
+
+interface loomReproducibilityVerification {
+  status: loomReproducibilityStatus;
+  checkedAt: string;
+  summary: string;
+  issues: string[];
+  note: {
+    status: "verified" | "changed" | "missing";
+    storedHash: string;
+    currentHash: string;
+  };
+  blocks: {
+    verified: number;
+    total: number;
+    issues: string[];
+  };
+}
+
+interface loomReproducibilitySnapshot {
+  version: number;
+  updatedAt: string;
+  noteHash: string;
+  policy: ReturnType<typeof serializeHashPolicy>;
+  blocks: loomCodeBlockHashEntry[];
+  verification?: loomReproducibilityVerification;
+}
 
 interface loomOutputFileTarget {
   path: string;
@@ -58,6 +122,37 @@ interface loomArchiveEntry {
   path: string;
   data: Uint8Array;
 }
+
+const HASH_POLICY_PRESETS: loomHashPolicyPresetDefinition[] = [
+  {
+    id: "strict",
+    label: "Strict",
+    description: "Any note, execution, input, or output metadata change invalidates the snapshot.",
+    ignoreFrontmatter: [],
+    ignoreBlockAttributes: [],
+  },
+  {
+    id: "runtime-flexible",
+    label: "Runtime Flexible",
+    description: "Allow execution target, working directory, and timeout changes while locking code and prose.",
+    ignoreFrontmatter: ["loom-execution", "loom-container", "loom-cwd", "loom-working-directory", "loom-timeout"],
+    ignoreBlockAttributes: ["loom-execution", "execution", "loom-container", "container", "loom-cwd", "cwd", "working-directory", "loom-timeout", "timeout"],
+  },
+  {
+    id: "runtime-inputs",
+    label: "Runtime + Inputs",
+    description: "Allow runtime fields plus stdin/input wiring changes.",
+    ignoreFrontmatter: ["loom-execution", "loom-container", "loom-cwd", "loom-working-directory", "loom-timeout"],
+    ignoreBlockAttributes: ["loom-execution", "execution", "loom-container", "container", "loom-cwd", "cwd", "working-directory", "loom-timeout", "timeout", "loom-stdin", "stdin", "loom-stdin-file", "stdin-file", "loom-input", "input"],
+  },
+  {
+    id: "runtime-inputs-outputs",
+    label: "Runtime + Inputs + Outputs",
+    description: "Allow runtime, stdin/input, and output destination plumbing changes.",
+    ignoreFrontmatter: ["loom-execution", "loom-container", "loom-cwd", "loom-working-directory", "loom-timeout"],
+    ignoreBlockAttributes: ["loom-execution", "execution", "loom-container", "container", "loom-cwd", "cwd", "working-directory", "loom-timeout", "timeout", "loom-stdin", "stdin", "loom-stdin-file", "stdin-file", "loom-input", "input", "loom-output-file", "output-file", "loom-output-file-mode", "output-file-mode", "loom-output-file-format", "output-file-format", "loom-output-file-streams", "output-file-streams", "loom-output-append", "output-append", "loom-output-lines", "output-lines"],
+  },
+];
 
 class ExecutionConsentModal extends Modal {
   constructor(
@@ -84,6 +179,63 @@ class ExecutionConsentModal extends Modal {
       await this.onConfirm();
       this.close();
     });
+  }
+}
+
+class ReproducibilityPolicyModal extends Modal {
+  private selectedPreset: Exclude<loomHashPolicyPreset, "custom">;
+  private descriptionEl: HTMLElement | null = null;
+
+  constructor(
+    app: Plugin["app"],
+    currentPolicy: loomHashPolicy,
+    private readonly onChoose: (preset: Exclude<loomHashPolicyPreset, "custom">) => Promise<void>,
+  ) {
+    super(app);
+    this.selectedPreset = currentPolicy.preset === "custom" ? "runtime-flexible" : currentPolicy.preset;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Loom Reproducibility Policy" });
+    contentEl.createEl("p", {
+      text: "Choose what may change without invalidating a saved reproducibility snapshot.",
+    });
+
+    this.descriptionEl = contentEl.createEl("p", { cls: "setting-item-description" });
+
+    new Setting(contentEl)
+      .setName("Policy preset")
+      .setDesc("Strict locks everything. Flexible presets allow selected execution plumbing to vary.")
+      .addDropdown((dropdown) => {
+        for (const preset of HASH_POLICY_PRESETS) {
+          dropdown.addOption(preset.id, preset.label);
+        }
+        dropdown.setValue(this.selectedPreset);
+        dropdown.onChange((value) => {
+          this.selectedPreset = value as Exclude<loomHashPolicyPreset, "custom">;
+          this.renderPresetDescription();
+        });
+      });
+
+    const actions = contentEl.createDiv({ cls: "loom-modal-actions" });
+    const cancelButton = actions.createEl("button", { text: "Cancel" });
+    const applyButton = actions.createEl("button", { text: "Apply policy", cls: "mod-cta" });
+    cancelButton.addEventListener("click", () => this.close());
+    applyButton.addEventListener("click", async () => {
+      await this.onChoose(this.selectedPreset);
+      this.close();
+    });
+
+    this.renderPresetDescription();
+  }
+
+  private renderPresetDescription(): void {
+    const preset = getHashPolicyPresetDefinition(this.selectedPreset);
+    if (this.descriptionEl) {
+      this.descriptionEl.setText(preset.description);
+    }
   }
 }
 
@@ -253,6 +405,156 @@ export default class loomPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "loom-save-reproducibility-snapshot",
+      name: "loom: Save Reproducibility Snapshot",
+      checkCallback: (checking) => {
+        const file = this.getActiveMarkdownFile();
+        if (!file) {
+          return false;
+        }
+        if (!checking) {
+          void this.saveReproducibilitySnapshot(file);
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "loom-verify-reproducibility-snapshot",
+      name: "loom: Verify Reproducibility Snapshot",
+      checkCallback: (checking) => {
+        const file = this.getActiveMarkdownFile();
+        if (!file) {
+          return false;
+        }
+        if (!checking) {
+          void this.verifyReproducibilitySnapshot(file);
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "loom-set-reproducibility-policy",
+      name: "loom: Set Reproducibility Policy",
+      checkCallback: (checking) => {
+        const file = this.getActiveMarkdownFile();
+        if (!file) {
+          return false;
+        }
+        if (!checking) {
+          void this.openReproducibilityPolicyModal(file);
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "loom-copy-reproducibility-snapshot",
+      name: "loom: Copy Reproducibility Snapshot",
+      checkCallback: (checking) => {
+        const file = this.getActiveMarkdownFile();
+        if (!file) {
+          return false;
+        }
+        if (!checking) {
+          void this.copyReproducibilitySnapshot(file);
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "loom-copy-note-hash",
+      name: "loom: Copy Note Hash",
+      checkCallback: (checking) => {
+        const file = this.getActiveMarkdownFile();
+        if (!file) {
+          return false;
+        }
+        if (!checking) {
+          void this.copyNoteHash(file);
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "loom-copy-verification-report",
+      name: "loom: Copy Reproducibility Verification Report",
+      checkCallback: (checking) => {
+        const file = this.getActiveMarkdownFile();
+        if (!file) {
+          return false;
+        }
+        if (!checking) {
+          void this.copyReproducibilityVerificationReport(file);
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "loom-hash-current-note",
+      name: "loom: Hash Current Note",
+      checkCallback: (checking) => {
+        const file = this.getActiveMarkdownFile();
+        if (!file) {
+          return false;
+        }
+        if (!checking) {
+          void this.hashCurrentNote(file);
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "loom-verify-current-note-hash",
+      name: "loom: Verify Current Note Hash",
+      checkCallback: (checking) => {
+        const file = this.getActiveMarkdownFile();
+        if (!file) {
+          return false;
+        }
+        if (!checking) {
+          void this.verifyCurrentNoteHash(file);
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "loom-hash-current-code-block",
+      name: "loom: Hash Current Code Block",
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (!view?.file) {
+          return false;
+        }
+        if (!checking) {
+          void this.hashCurrentCodeBlock();
+        }
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "loom-verify-code-block-hashes",
+      name: "loom: Verify Code Block Hashes in Current Note",
+      checkCallback: (checking) => {
+        const file = this.getActiveMarkdownFile();
+        if (!file) {
+          return false;
+        }
+        if (!checking) {
+          void this.verifyCodeBlockHashes(file);
+        }
+        return true;
+      },
+    });
+
     this.registerCodeBlockProcessors();
 
     this.registerEditorExtension(this.createLivePreviewExtension());
@@ -268,14 +570,16 @@ export default class loomPlugin extends Plugin {
       }),
     );
 
-    this.addCommand({
-      id: "loom-validate-container-groups",
-      name: "loom: Validate Container Groups",
-      callback: async () => {
-        const groups = await this.getContainerGroupSummaries();
-        new Notice(groups.length ? groups.map((group) => `${group.name}: ${group.status}`).join("\n") : "No loom container groups found.", 8000);
-      },
-    });
+    if (isCompileFeatureAllowed("container-groups")) {
+      this.addCommand({
+        id: "loom-validate-container-groups",
+        name: "loom: Validate Container Groups",
+        callback: async () => {
+          const groups = await this.getContainerGroupSummaries();
+          new Notice(groups.length ? groups.map((group) => `${group.name}: ${group.status}`).join("\n") : "No loom container groups found.", 8000);
+        },
+      });
+    }
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
@@ -422,6 +726,7 @@ export default class loomPlugin extends Plugin {
   createToolbarElement(block: loomCodeBlock): HTMLElement {
     return createCodeBlockToolbar(block.id, this.isBlockRunning(block.id), {
       onRun: () => void this.runActiveBlockById(block.id),
+      onEdit: () => void this.editBlockById(block.id),
       onCopy: async () => {
         try {
           await navigator.clipboard.writeText(block.content);
@@ -448,6 +753,43 @@ export default class loomPlugin extends Plugin {
         this.notifyOutputChanged(block.id);
       },
     });
+  }
+
+  async editBlockById(blockId: string): Promise<void> {
+    const block = this.findActiveBlockById(blockId);
+    if (!block) {
+      new Notice("Could not find this loom block.");
+      return;
+    }
+
+    const file = this.app.vault.getAbstractFileByPath(block.filePath);
+    if (!(file instanceof TFile)) {
+      new Notice("Could not open the note for this loom block.");
+      return;
+    }
+
+    let leaf = this.app.workspace.getLeavesOfType("markdown")
+      .find((candidate) => {
+        const view = candidate.view;
+        return view instanceof MarkdownView && view.file?.path === file.path;
+      }) ?? this.app.workspace.getLeaf(false);
+
+    await leaf.openFile(file);
+    await this.enforceSourceModeForLeaf(leaf);
+    leaf = this.app.workspace.getActiveViewOfType(MarkdownView)?.leaf ?? leaf;
+
+    const view = leaf.view;
+    if (!(view instanceof MarkdownView) || !view.editor) {
+      new Notice("Open the note in editing mode to edit this loom block.");
+      return;
+    }
+
+    view.editor.focus();
+    view.editor.setCursor({ line: block.startLine, ch: 0 });
+    view.editor.scrollIntoView({
+      from: { line: block.startLine, ch: 0 },
+      to: { line: block.endLine, ch: 0 },
+    }, true);
   }
 
   renderOutputInto(block: loomCodeBlock, container: HTMLElement): void {
@@ -526,7 +868,7 @@ export default class loomPlugin extends Plugin {
     const source = await this.app.vault.cachedRead(file);
     const blocks = parseMarkdownCodeBlocks(file.path, source, this.settings);
     const supportedBlocks = blocks.filter((block) => {
-      const executionContext = resolveExecutionContext(this.app, file, block, this.settings);
+      const executionContext = this.resolveExecutionContext(file, block);
       return executionContext.containerGroup || this.registry.getRunnerForBlock(block, this.settings);
     });
 
@@ -551,6 +893,263 @@ export default class loomPlugin extends Plugin {
     new Notice("loom outputs cleared.");
   }
 
+  async saveReproducibilitySnapshot(file: TFile): Promise<void> {
+    const source = await this.app.vault.cachedRead(file);
+    const snapshot = this.createReproducibilitySnapshot(file.path, source);
+
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      const target = frontmatter as Record<string, unknown>;
+      target[REPRODUCIBILITY_FRONTMATTER_KEY] = snapshot;
+      target[NOTE_HASH_FRONTMATTER_KEY] = snapshot.noteHash;
+      target[CODE_BLOCK_HASHES_FRONTMATTER_KEY] = snapshot.blocks;
+    });
+
+    new Notice(`loom reproducibility snapshot saved (${snapshot.blocks.length} block${snapshot.blocks.length === 1 ? "" : "s"}).`);
+  }
+
+  async verifyReproducibilitySnapshot(file: TFile): Promise<void> {
+    const source = await this.app.vault.cachedRead(file);
+    const verification = this.createReproducibilityVerification(file.path, source);
+    await this.writeReproducibilityVerification(file, verification);
+    new Notice(verification.summary, verification.status === "verified" ? 6000 : 12000);
+  }
+
+  async openReproducibilityPolicyModal(file: TFile): Promise<void> {
+    const source = await this.app.vault.cachedRead(file);
+    new ReproducibilityPolicyModal(this.app, readHashPolicy(source), async (preset) => {
+      await this.applyReproducibilityPolicyPreset(file, preset);
+    }).open();
+  }
+
+  async applyReproducibilityPolicyPreset(file: TFile, presetId: Exclude<loomHashPolicyPreset, "custom">): Promise<void> {
+    const policy = hashPolicyFromPreset(presetId);
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      const target = frontmatter as Record<string, unknown>;
+      target[HASH_POLICY_FRONTMATTER_KEY] = serializeHashPolicy(policy);
+      const existing = isRecord(target[REPRODUCIBILITY_FRONTMATTER_KEY])
+        ? { ...target[REPRODUCIBILITY_FRONTMATTER_KEY] }
+        : {};
+      target[REPRODUCIBILITY_FRONTMATTER_KEY] = {
+        ...existing,
+        version: REPRODUCIBILITY_SNAPSHOT_VERSION,
+        policy: serializeHashPolicy(policy),
+      };
+    });
+    new Notice(`loom reproducibility policy set to ${getHashPolicyPresetDefinition(presetId).label}.`);
+  }
+
+  async copyReproducibilitySnapshot(file: TFile): Promise<void> {
+    const source = await this.app.vault.cachedRead(file);
+    const existing = readReproducibilityFrontmatter(source);
+    const snapshot = existing ?? this.createReproducibilitySnapshot(file.path, source);
+    await this.copyTextToClipboard(JSON.stringify(snapshot, null, 2), "Reproducibility snapshot copied.");
+  }
+
+  async copyNoteHash(file: TFile): Promise<void> {
+    const source = await this.app.vault.cachedRead(file);
+    const hash = readStoredNoteHash(source) ?? sha256Hash(canonicalizeNoteForHash(source));
+    await this.copyTextToClipboard(hash, "Note hash copied.");
+  }
+
+  async copyReproducibilityVerificationReport(file: TFile): Promise<void> {
+    const source = await this.app.vault.cachedRead(file);
+    const existing = readReproducibilityFrontmatter(source);
+    const report = isRecord(existing?.verification)
+      ? existing.verification
+      : this.createReproducibilityVerification(file.path, source);
+    await this.copyTextToClipboard(JSON.stringify(report, null, 2), "Reproducibility verification report copied.");
+  }
+
+  private async copyTextToClipboard(text: string, successMessage: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(text);
+      new Notice(successMessage);
+    } catch {
+      new Notice("Clipboard write failed.");
+    }
+  }
+
+  async hashCurrentNote(file: TFile): Promise<void> {
+    const source = await this.app.vault.cachedRead(file);
+    const noteHash = sha256Hash(canonicalizeNoteForHash(source));
+
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      const target = frontmatter as Record<string, unknown>;
+      target[NOTE_HASH_FRONTMATTER_KEY] = noteHash;
+      if (isRecord(target[REPRODUCIBILITY_FRONTMATTER_KEY])) {
+        target[REPRODUCIBILITY_FRONTMATTER_KEY] = {
+          ...target[REPRODUCIBILITY_FRONTMATTER_KEY],
+          version: REPRODUCIBILITY_SNAPSHOT_VERSION,
+          updatedAt: new Date().toISOString(),
+          noteHash,
+          policy: serializeHashPolicy(readHashPolicy(source)),
+        };
+      }
+    });
+
+    if (this.settings.hashCodeBlocks) {
+      await this.writeCodeBlockHashesToFrontmatter(file);
+    }
+
+    new Notice(`loom note hash written: ${noteHash}`);
+  }
+
+  async verifyCurrentNoteHash(file: TFile): Promise<void> {
+    const source = await this.app.vault.cachedRead(file);
+    const storedHash = readStoredNoteHash(source);
+    if (!storedHash) {
+      new Notice("No loom-note-hash found. Run loom: Hash Current Note first.");
+      return;
+    }
+
+    const currentHash = sha256Hash(canonicalizeNoteForHash(source));
+    if (storedHash === currentHash) {
+      new Notice("loom note hash verified.");
+      return;
+    }
+
+    new Notice(`loom note hash mismatch. stored=${storedHash.slice(0, 12)} current=${currentHash.slice(0, 12)}`, 10000);
+  }
+
+  async hashCurrentCodeBlock(): Promise<void> {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const file = view?.file;
+    const editor = view?.editor;
+    if (!file || !editor) {
+      new Notice("Open a Markdown note in editing mode to hash the current code block.");
+      return;
+    }
+
+    const source = editor.getValue();
+    const blocks = parseMarkdownCodeBlocks(file.path, source, this.settings);
+    const block = findBlockAtLine(blocks, editor.getCursor().line);
+    if (!block) {
+      new Notice("No supported loom block at the current cursor.");
+      return;
+    }
+
+    const entries = await this.writeCodeBlockHashesToFrontmatter(file, source);
+    const currentEntry = entries.find((entry) => entry.ordinal === block.ordinal);
+    new Notice(`loom block hash: ${currentEntry?.hash ?? this.createCodeBlockHashEntry(block, readHashPolicy(source)).hash}`);
+  }
+
+  async verifyCodeBlockHashes(file: TFile): Promise<void> {
+    const source = await this.app.vault.cachedRead(file);
+    const storedEntries = readStoredCodeBlockHashEntries(source);
+    if (!storedEntries.length) {
+      new Notice("No loom-code-block-hashes found. Run loom: Hash Current Code Block first.");
+      return;
+    }
+
+    const policy = readHashPolicy(source);
+    const currentEntries = parseMarkdownCodeBlocks(file.path, source, this.settings)
+      .map((block) => this.createCodeBlockHashEntry(block, policy));
+    const storedByOrdinal = new Map(storedEntries.map((entry) => [entry.ordinal, entry]));
+    const currentByOrdinal = new Map(currentEntries.map((entry) => [entry.ordinal, entry]));
+    let verified = 0;
+    const issues: string[] = [];
+
+    for (const current of currentEntries) {
+      const stored = storedByOrdinal.get(current.ordinal);
+      if (!stored) {
+        issues.push(`#${current.ordinal} missing stored hash`);
+        continue;
+      }
+      if (stored.hash !== current.hash || stored.language !== current.language) {
+        issues.push(`#${current.ordinal} changed`);
+        continue;
+      }
+      verified += 1;
+    }
+
+    for (const stored of storedEntries) {
+      if (!currentByOrdinal.has(stored.ordinal)) {
+        issues.push(`#${stored.ordinal} stored hash has no current block`);
+      }
+    }
+
+    if (!issues.length) {
+      new Notice(`loom verified ${verified} code block hash${verified === 1 ? "" : "es"}.`);
+      return;
+    }
+
+    new Notice(`loom block hash verification failed: ${issues.slice(0, 4).join("; ")}${issues.length > 4 ? `; +${issues.length - 4} more` : ""}`, 12000);
+  }
+
+  private createReproducibilitySnapshot(filePath: string, source: string): loomReproducibilitySnapshot {
+    const policy = readHashPolicy(source);
+    const blocks = parseMarkdownCodeBlocks(filePath, source, this.settings)
+      .map((block) => this.createCodeBlockHashEntry(block, policy));
+    return {
+      version: REPRODUCIBILITY_SNAPSHOT_VERSION,
+      updatedAt: new Date().toISOString(),
+      noteHash: sha256Hash(canonicalizeNoteForHash(source)),
+      policy: serializeHashPolicy(policy),
+      blocks,
+    };
+  }
+
+  private createReproducibilityVerification(filePath: string, source: string): loomReproducibilityVerification {
+    const storedHash = readStoredNoteHash(source) ?? "";
+    const currentHash = sha256Hash(canonicalizeNoteForHash(source));
+    const storedEntries = readStoredCodeBlockHashEntries(source);
+    const policy = readHashPolicy(source);
+    const currentEntries = parseMarkdownCodeBlocks(filePath, source, this.settings)
+      .map((block) => this.createCodeBlockHashEntry(block, policy));
+    const blockComparison = compareCodeBlockHashEntries(storedEntries, currentEntries);
+    const issues: string[] = [];
+
+    const noteStatus = storedHash
+      ? storedHash === currentHash ? "verified" : "changed"
+      : "missing";
+    if (noteStatus === "missing") {
+      issues.push("note snapshot is missing");
+    } else if (noteStatus === "changed") {
+      issues.push("note content changed");
+    }
+    issues.push(...blockComparison.issues);
+
+    const status: loomReproducibilityStatus = !storedHash && !storedEntries.length
+      ? "missing-snapshot"
+      : issues.length ? "changed" : "verified";
+    const summary = status === "verified"
+      ? `loom reproducibility verified (${blockComparison.verified} block${blockComparison.verified === 1 ? "" : "s"}).`
+      : status === "missing-snapshot"
+        ? "No loom reproducibility snapshot found. Save a snapshot first."
+        : `loom reproducibility changed: ${issues.slice(0, 3).join("; ")}${issues.length > 3 ? `; +${issues.length - 3} more` : ""}`;
+
+    return {
+      status,
+      checkedAt: new Date().toISOString(),
+      summary,
+      issues,
+      note: {
+        status: noteStatus,
+        storedHash,
+        currentHash,
+      },
+      blocks: {
+        verified: blockComparison.verified,
+        total: currentEntries.length,
+        issues: blockComparison.issues,
+      },
+    };
+  }
+
+  private async writeReproducibilityVerification(file: TFile, verification: loomReproducibilityVerification): Promise<void> {
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      const target = frontmatter as Record<string, unknown>;
+      const existing = isRecord(target[REPRODUCIBILITY_FRONTMATTER_KEY])
+        ? { ...target[REPRODUCIBILITY_FRONTMATTER_KEY] }
+        : { version: REPRODUCIBILITY_SNAPSHOT_VERSION };
+      target[REPRODUCIBILITY_FRONTMATTER_KEY] = {
+        ...existing,
+        version: REPRODUCIBILITY_SNAPSHOT_VERSION,
+        verification,
+      };
+    });
+  }
+
   async runBlock(file: TFile, block: loomCodeBlock): Promise<void> {
     this.lastMarkdownFilePath = file.path;
     if (this.running.has(block.id)) {
@@ -563,7 +1162,7 @@ export default class loomPlugin extends Plugin {
       return;
     }
 
-    const executionContext = resolveExecutionContext(this.app, file, block, this.settings);
+    const executionContext = this.resolveExecutionContext(file, block);
     const containerGroup = executionContext.containerGroup;
     const runner = containerGroup ? null : this.registry.getRunnerForBlock(block, this.settings);
     if (!runner) {
@@ -648,10 +1247,63 @@ export default class loomPlugin extends Plugin {
       });
       new Notice(`loom error: ${message}`);
     } finally {
+      await this.writeCodeBlockHashesIfEnabled(file);
       this.running.delete(block.id);
       this.notifyOutputChanged(block.id);
       this.updateStatusBar();
     }
+  }
+
+  private async writeCodeBlockHashesIfEnabled(file: TFile): Promise<void> {
+    if (!this.settings.hashCodeBlocks) {
+      return;
+    }
+
+    try {
+      await this.writeCodeBlockHashesToFrontmatter(file);
+    } catch (error) {
+      console.warn("loom: failed to write code block hashes", error);
+    }
+  }
+
+  private async writeCodeBlockHashesToFrontmatter(file: TFile, source?: string): Promise<loomCodeBlockHashEntry[]> {
+    const text = source ?? await this.app.vault.cachedRead(file);
+    const policy = readHashPolicy(text);
+    const entries = parseMarkdownCodeBlocks(file.path, text, this.settings)
+      .map((block) => this.createCodeBlockHashEntry(block, policy));
+
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      const target = frontmatter as Record<string, unknown>;
+      target[CODE_BLOCK_HASHES_FRONTMATTER_KEY] = entries;
+      if (isRecord(target[REPRODUCIBILITY_FRONTMATTER_KEY])) {
+        target[REPRODUCIBILITY_FRONTMATTER_KEY] = {
+          ...target[REPRODUCIBILITY_FRONTMATTER_KEY],
+          version: REPRODUCIBILITY_SNAPSHOT_VERSION,
+          updatedAt: new Date().toISOString(),
+          policy: serializeHashPolicy(policy),
+          blocks: entries,
+        };
+      }
+    });
+
+    return entries;
+  }
+
+  private createCodeBlockHashEntry(block: loomCodeBlock, policy: loomHashPolicy): loomCodeBlockHashEntry {
+    return {
+      id: block.id,
+      ordinal: block.ordinal,
+      language: block.language,
+      alias: block.sourceLanguage || block.languageAlias,
+      hash: sha256Hash(stableStringify({
+        language: block.language,
+        sourceLanguage: block.sourceLanguage,
+        attributes: filterHashPolicyAttributes(block.attributes, policy),
+        content: block.content,
+      })),
+      startLine: block.startLine + 1,
+      endLine: block.endLine + 1,
+    };
   }
 
   private async ensureExecutionEnabled(): Promise<boolean> {
@@ -789,10 +1441,22 @@ export default class loomPlugin extends Plugin {
   }
 
   async getContainerGroupSummaries(): Promise<Array<{ name: string; status: string }>> {
-    return this.containerRunner.getGroupSummaries();
+    if (!isCompileFeatureAllowed("container-groups")) {
+      return [];
+    }
+    return (await this.containerRunner.getGroupSummaries())
+      .filter((group) => isCompileContainerGroupAllowed(group.name));
   }
 
   async buildContainerGroup(name: string): Promise<void> {
+    if (!isCompileFeatureAllowed("container-groups")) {
+      new Notice("loom container groups are not included in this build.");
+      return;
+    }
+    if (!isCompileContainerGroupAllowed(name)) {
+      new Notice(`loom container group ${name} is not included in this build.`);
+      return;
+    }
     const controller = new AbortController();
     const result = await this.containerRunner.buildGroup(name, Math.max(this.settings.defaultTimeoutMs, 120_000), controller.signal);
     new Notice(result.success ? `loom built container group ${name}.` : `loom container build failed for ${name}.`, 8000);
@@ -884,8 +1548,14 @@ export default class loomPlugin extends Plugin {
     normalizeLanguageConfiguration(this.settings);
     this.settings.outputVisibleLines = normalizeNonNegativeInteger(this.settings.outputVisibleLines, DEFAULT_SETTINGS.outputVisibleLines, 2000);
     this.settings.defaultTimeoutMs = normalizePositiveInteger(this.settings.defaultTimeoutMs, DEFAULT_SETTINGS.defaultTimeoutMs);
+    this.settings.hashCodeBlocks = this.settings.hashCodeBlocks ?? DEFAULT_SETTINGS.hashCodeBlocks;
     this.settings.showObsidianContextWarning = this.settings.showObsidianContextWarning ?? DEFAULT_SETTINGS.showObsidianContextWarning;
-    this.settings.defaultContainerGroup = normalizeStringSetting(this.settings.defaultContainerGroup, DEFAULT_SETTINGS.defaultContainerGroup);
+    this.settings.defaultContainerGroup = isCompileFeatureAllowed("container-groups")
+      ? normalizeStringSetting(this.settings.defaultContainerGroup, DEFAULT_SETTINGS.defaultContainerGroup)
+      : "";
+    if (this.settings.defaultContainerGroup && !isCompileContainerGroupAllowed(this.settings.defaultContainerGroup)) {
+      this.settings.defaultContainerGroup = "";
+    }
     this.settings.workingDirectory = normalizeStringSetting(this.settings.workingDirectory, DEFAULT_SETTINGS.workingDirectory);
   }
 
@@ -1042,6 +1712,22 @@ export default class loomPlugin extends Plugin {
     );
   }
 
+  private resolveExecutionContext(file: TFile, block: loomCodeBlock): loomResolvedExecutionContext {
+    const context = resolveLoomExecutionContext(this.app, file, block, this.settings);
+    if (isCompileFeatureAllowed("container-groups") && (!context.containerGroup || isCompileContainerGroupAllowed(context.containerGroup))) {
+      return context;
+    }
+
+    return {
+      ...context,
+      containerGroup: undefined,
+      source: {
+        ...context.source,
+        container: "none",
+      },
+    };
+  }
+
   private hasExplicitExecutionContext(context: loomResolvedExecutionContext): boolean {
     return context.source.container !== "none" || context.source.workingDirectory !== "default" || context.source.timeout !== "global";
   }
@@ -1068,7 +1754,7 @@ export default class loomPlugin extends Plugin {
       return undefined;
     }
 
-    const executionContext = resolveExecutionContext(this.app, file, block, this.settings);
+    const executionContext = this.resolveExecutionContext(file, block);
     return {
       mode,
       language: language.name,
@@ -1701,4 +2387,314 @@ function normalizeNonNegativeInteger(value: unknown, fallback: number, max: numb
 
 function normalizeStringSetting(value: unknown, fallback: string): string {
   return typeof value === "string" ? value : fallback;
+}
+
+function canonicalizeNoteForHash(source: string): string {
+  const policy = readHashPolicy(source);
+  const frontmatter = splitFrontmatter(source);
+  const canonicalBody = canonicalizeFenceInfoForHash(frontmatter?.body ?? source, policy);
+  if (!frontmatter) {
+    return canonicalBody;
+  }
+
+  const parsed = parseFrontmatterRecord(frontmatter.yaml);
+  const canonicalFrontmatter = Object.fromEntries(
+    Object.keys(parsed)
+      .sort()
+      .filter((key) => !shouldIgnoreFrontmatterKey(key, policy))
+      .map((key) => [key, parsed[key]]),
+  );
+
+  return stableStringify({
+    frontmatter: canonicalFrontmatter,
+    body: canonicalBody,
+  });
+}
+
+function readHashPolicy(source: string): loomHashPolicy {
+  const frontmatter = splitFrontmatter(source);
+  const parsed = frontmatter ? parseFrontmatterRecord(frontmatter.yaml) : {};
+  const rawPolicy = parsed[HASH_POLICY_FRONTMATTER_KEY];
+  const nestedPolicy = isRecord(rawPolicy) ? rawPolicy : {};
+  const presetId = readHashPolicyPreset(typeof rawPolicy === "string" ? rawPolicy : readString(nestedPolicy.preset));
+  const basePolicy = hashPolicyFromPreset(presetId ?? "strict");
+  const policy = {
+    preset: presetId ?? basePolicy.preset,
+    ignoreFrontmatter: normalizePolicyList([
+      ...basePolicy.ignoreFrontmatter,
+      ...readStringList(parsed[HASH_IGNORE_FRONTMATTER_KEY]),
+      ...readStringList(nestedPolicy["ignore-frontmatter"] ?? nestedPolicy.ignoreFrontmatter ?? nestedPolicy.frontmatter),
+    ]),
+    ignoreBlockAttributes: normalizePolicyList([
+      ...basePolicy.ignoreBlockAttributes,
+      ...readStringList(parsed[HASH_IGNORE_BLOCK_ATTRIBUTES_KEY]),
+      ...readStringList(nestedPolicy["ignore-block-attributes"] ?? nestedPolicy.ignoreBlockAttributes ?? nestedPolicy.blockAttributes),
+    ]),
+  };
+  const matchedPreset = matchHashPolicyPreset(policy);
+
+  return {
+    ...policy,
+    preset: matchedPreset ?? "custom",
+  };
+}
+
+function readStoredNoteHash(source: string): string | null {
+  const frontmatter = splitFrontmatter(source);
+  if (!frontmatter) {
+    return null;
+  }
+  const parsed = parseFrontmatterRecord(frontmatter.yaml);
+  const snapshot = isRecord(parsed[REPRODUCIBILITY_FRONTMATTER_KEY]) ? parsed[REPRODUCIBILITY_FRONTMATTER_KEY] : null;
+  const value = snapshot?.noteHash ?? parsed[NOTE_HASH_FRONTMATTER_KEY];
+  return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value.trim()) ? value.trim().toLowerCase() : null;
+}
+
+function readReproducibilityFrontmatter(source: string): Record<string, unknown> | null {
+  const frontmatter = splitFrontmatter(source);
+  if (!frontmatter) {
+    return null;
+  }
+  const value = parseFrontmatterRecord(frontmatter.yaml)[REPRODUCIBILITY_FRONTMATTER_KEY];
+  return isRecord(value) ? value : null;
+}
+
+function readStoredCodeBlockHashEntries(source: string): loomCodeBlockHashEntry[] {
+  const frontmatter = splitFrontmatter(source);
+  if (!frontmatter) {
+    return [];
+  }
+  const parsed = parseFrontmatterRecord(frontmatter.yaml);
+  const snapshot = isRecord(parsed[REPRODUCIBILITY_FRONTMATTER_KEY]) ? parsed[REPRODUCIBILITY_FRONTMATTER_KEY] : null;
+  const value = snapshot?.blocks ?? parsed[CODE_BLOCK_HASHES_FRONTMATTER_KEY];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map(readStoredCodeBlockHashEntry)
+    .filter((entry): entry is loomCodeBlockHashEntry => Boolean(entry));
+}
+
+function readStoredCodeBlockHashEntry(value: unknown): loomCodeBlockHashEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const ordinal = readPositiveNumber(value.ordinal);
+  const startLine = readPositiveNumber(value.startLine);
+  const endLine = readPositiveNumber(value.endLine);
+  const hash = typeof value.hash === "string" ? value.hash.trim().toLowerCase() : "";
+  const language = typeof value.language === "string" ? value.language.trim() : "";
+  if (!ordinal || !startLine || !endLine || !/^[a-f0-9]{64}$/i.test(hash) || !language) {
+    return null;
+  }
+
+  return {
+    id: typeof value.id === "string" ? value.id.trim() : "",
+    ordinal,
+    language,
+    alias: typeof value.alias === "string" ? value.alias.trim() : language,
+    hash,
+    startLine,
+    endLine,
+  };
+}
+
+function readPositiveNumber(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : Number.NaN;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function splitFrontmatter(source: string): { yaml: string; body: string } | null {
+  const lines = source.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") {
+    return null;
+  }
+
+  let frontmatterEnd = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    if (lines[i].trim() === "---") {
+      frontmatterEnd = i;
+      break;
+    }
+  }
+  if (frontmatterEnd < 0) {
+    return null;
+  }
+
+  return {
+    yaml: lines.slice(1, frontmatterEnd).join("\n"),
+    body: lines.slice(frontmatterEnd + 1).join("\n"),
+  };
+}
+
+function parseFrontmatterRecord(yaml: string): Record<string, unknown> {
+  try {
+    const parsed = parseYaml(yaml);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function shouldIgnoreFrontmatterKey(key: string, policy: loomHashPolicy): boolean {
+  const normalized = normalizeHashPolicyToken(key);
+  if (LOOM_HASH_FRONTMATTER_KEYS.has(normalized) || normalized === REPRODUCIBILITY_FRONTMATTER_KEY) {
+    return true;
+  }
+  if (normalized === HASH_POLICY_FRONTMATTER_KEY || normalized === HASH_IGNORE_FRONTMATTER_KEY || normalized === HASH_IGNORE_BLOCK_ATTRIBUTES_KEY) {
+    return false;
+  }
+  return policy.ignoreFrontmatter.includes(normalized);
+}
+
+function hashPolicyFromPreset(presetId: Exclude<loomHashPolicyPreset, "custom">): loomHashPolicy {
+  const preset = getHashPolicyPresetDefinition(presetId);
+  return {
+    preset: preset.id,
+    ignoreFrontmatter: normalizePolicyList(preset.ignoreFrontmatter),
+    ignoreBlockAttributes: normalizePolicyList(preset.ignoreBlockAttributes),
+  };
+}
+
+function getHashPolicyPresetDefinition(presetId: Exclude<loomHashPolicyPreset, "custom">): loomHashPolicyPresetDefinition {
+  return HASH_POLICY_PRESETS.find((preset) => preset.id === presetId) ?? HASH_POLICY_PRESETS[0];
+}
+
+function readHashPolicyPreset(value: string): Exclude<loomHashPolicyPreset, "custom"> | null {
+  const normalized = normalizeHashPolicyToken(value);
+  return HASH_POLICY_PRESETS.some((preset) => preset.id === normalized)
+    ? normalized as Exclude<loomHashPolicyPreset, "custom">
+    : null;
+}
+
+function matchHashPolicyPreset(policy: Pick<loomHashPolicy, "ignoreFrontmatter" | "ignoreBlockAttributes">): loomHashPolicyPreset | null {
+  const frontmatter = normalizePolicyList(policy.ignoreFrontmatter);
+  const blockAttributes = normalizePolicyList(policy.ignoreBlockAttributes);
+  for (const preset of HASH_POLICY_PRESETS) {
+    if (sameStringSet(frontmatter, normalizePolicyList(preset.ignoreFrontmatter)) && sameStringSet(blockAttributes, normalizePolicyList(preset.ignoreBlockAttributes))) {
+      return preset.id;
+    }
+  }
+  return frontmatter.length || blockAttributes.length ? "custom" : "strict";
+}
+
+function serializeHashPolicy(policy: loomHashPolicy): { preset: loomHashPolicyPreset; "ignore-frontmatter": string[]; "ignore-block-attributes": string[] } {
+  return {
+    preset: policy.preset,
+    "ignore-frontmatter": [...policy.ignoreFrontmatter],
+    "ignore-block-attributes": [...policy.ignoreBlockAttributes],
+  };
+}
+
+function compareCodeBlockHashEntries(storedEntries: loomCodeBlockHashEntry[], currentEntries: loomCodeBlockHashEntry[]): { verified: number; issues: string[] } {
+  const storedByOrdinal = new Map(storedEntries.map((entry) => [entry.ordinal, entry]));
+  const currentByOrdinal = new Map(currentEntries.map((entry) => [entry.ordinal, entry]));
+  let verified = 0;
+  const issues: string[] = [];
+
+  for (const current of currentEntries) {
+    const stored = storedByOrdinal.get(current.ordinal);
+    if (!stored) {
+      issues.push(`block #${current.ordinal} missing stored hash`);
+      continue;
+    }
+    if (stored.hash !== current.hash || stored.language !== current.language) {
+      issues.push(`block #${current.ordinal} changed`);
+      continue;
+    }
+    verified += 1;
+  }
+
+  for (const stored of storedEntries) {
+    if (!currentByOrdinal.has(stored.ordinal)) {
+      issues.push(`block #${stored.ordinal} stored hash has no current block`);
+    }
+  }
+
+  return { verified, issues };
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const rightSet = new Set(right);
+  return left.every((value) => rightSet.has(value));
+}
+
+function canonicalizeFenceInfoForHash(source: string, policy: loomHashPolicy): string {
+  if (!policy.ignoreBlockAttributes.length) {
+    return source;
+  }
+
+  const ignored = new Set(policy.ignoreBlockAttributes);
+  const lines = source.split(/\r?\n/);
+  let fenceToken: string | null = null;
+
+  return lines.map((line) => {
+    const trimmed = line.trim();
+    if (fenceToken) {
+      if (trimmed.startsWith(fenceToken) && /^(```+|~~~+)\s*$/.test(trimmed)) {
+        fenceToken = null;
+      }
+      return line;
+    }
+
+    const match = line.match(/^(\s*)(```+|~~~+)(\s*)([^\s`]*)?(.*)$/);
+    if (!match) {
+      return line;
+    }
+
+    fenceToken = match[2];
+    const language = match[4] ?? "";
+    const attributes = removeIgnoredInfoAttributes(match[5] ?? "", ignored);
+    const languagePart = language ? `${match[3]}${language}` : match[3];
+    return `${match[1]}${match[2]}${languagePart}${attributes ? ` ${attributes}` : ""}`;
+  }).join("\n");
+}
+
+function removeIgnoredInfoAttributes(input: string, ignored: Set<string>): string {
+  return input
+    .replace(/([A-Za-z0-9_-]+)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s]+)/g, (full, key: string) =>
+      ignored.has(normalizeHashPolicyToken(key)) ? "" : full,
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function filterHashPolicyAttributes(attributes: Record<string, string>, policy: loomHashPolicy): Record<string, string> {
+  const ignored = new Set(policy.ignoreBlockAttributes);
+  return Object.fromEntries(
+    Object.entries(attributes).filter(([key]) => !ignored.has(normalizeHashPolicyToken(key))),
+  );
+}
+
+function readStringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => readStringList(entry));
+  }
+  if (typeof value === "string") {
+    return value.split(",");
+  }
+  return [];
+}
+
+function normalizePolicyList(values: string[]): string[] {
+  return [...new Set(values.map(normalizeHashPolicyToken).filter(Boolean))];
+}
+
+function normalizeHashPolicyToken(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableStringify(entry)).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }

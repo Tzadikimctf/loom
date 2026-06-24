@@ -2,6 +2,7 @@ import { setIcon } from "obsidian";
 
 export interface loomToolbarHandlers {
   onRun: () => void;
+  onEdit: () => void;
   onCopy: () => void;
   onRemove: () => void;
   onToggleInput: () => void;
@@ -18,6 +19,7 @@ export function createCodeBlockToolbar(
   toolbar.dataset.loomBlockId = blockId;
 
   toolbar.appendChild(createButton("Run block", isRunning ? "loader-circle" : "play", handlers.onRun, isRunning));
+  toolbar.appendChild(createButton("Edit block", "pencil", handlers.onEdit, false));
   toolbar.appendChild(createButton("Toggle stdin input", "text-cursor-input", handlers.onToggleInput, false));
   toolbar.appendChild(createButton("Copy code", "copy", handlers.onCopy, false));
   toolbar.appendChild(createButton("Remove snippet", "trash-2", handlers.onRemove, false));

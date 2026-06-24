@@ -3,6 +3,7 @@ import { closeSync, existsSync, openSync } from "fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
 import { basename, join, normalize as normalizeFsPath, posix as posixPath } from "path";
 import { spawn } from "child_process";
+import { isCompileContainerGroupAllowed, isCompileContainerRuntimeAllowed, isCompileFeatureAllowed } from "../buildProfile";
 import { runProcess } from "./processRunner";
 import { splitCommandLine } from "../utils/command";
 import { findEnabledCommandLanguage } from "../languagePackages";
@@ -170,7 +171,7 @@ export class loomContainerRunner {
     const entries = await readdir(containersPath, { withFileTypes: true });
     return Promise.all(
       entries
-        .filter((entry) => entry.isDirectory())
+        .filter((entry) => entry.isDirectory() && isCompileContainerGroupAllowed(entry.name))
         .map(async (entry) => {
           const groupPath = join(containersPath, entry.name);
           const hasConfig = existsSync(join(groupPath, "config.json"));
@@ -219,6 +220,9 @@ export class loomContainerRunner {
   }
 
   async run(block: loomCodeBlock, context: loomRunContext, settings: loomPluginSettings, groupName: string): Promise<loomRunResult> {
+    if (!isCompileContainerGroupAllowed(groupName)) {
+      throw new Error(`Container group ${groupName} is not included in this Loom build.`);
+    }
     const groupPath = this.resolveGroupPath(groupName);
     const config = await this.readConfig(groupPath);
     const configLang = config.languages[block.language] ?? config.languages[block.languageAlias];
@@ -287,6 +291,9 @@ export class loomContainerRunner {
   }
 
   async buildGroup(groupName: string, timeoutMs: number, signal: AbortSignal): Promise<loomRunResult> {
+    if (!isCompileContainerGroupAllowed(groupName)) {
+      throw new Error(`Container group ${groupName} is not included in this Loom build.`);
+    }
     const groupPath = this.resolveGroupPath(groupName);
     const config = await this.readConfig(groupPath);
     await mkdir(groupPath, { recursive: true });
@@ -822,16 +829,21 @@ export class loomContainerRunner {
   }
 
   private readRuntime(value: unknown): loomContainerRuntime {
+    let runtime: loomContainerRuntime;
     if (value == null) {
-      return "docker";
+      runtime = "docker";
+    } else if (value === "remote") {
+      runtime = "ssh";
+    } else if (value === "docker" || value === "podman" || value === "qemu" || value === "custom" || value === "wsl" || value === "ssh") {
+      runtime = value;
+    } else {
+      throw new Error("Container config runtime must be docker, podman, qemu, custom, wsl, ssh, or remote.");
     }
-    if (value === "remote") {
-      return "ssh";
+
+    if (!isCompileContainerRuntimeAllowed(runtime)) {
+      throw new Error(`Container runtime ${runtime} is not included in this Loom build.`);
     }
-    if (value === "docker" || value === "podman" || value === "qemu" || value === "custom" || value === "wsl" || value === "ssh") {
-      return value;
-    }
-    throw new Error("Container config runtime must be docker, podman, qemu, custom, wsl, ssh, or remote.");
+    return runtime;
   }
 
   private readWslConfig(value: unknown): loomWslConfig | undefined {
@@ -906,6 +918,9 @@ export class loomContainerRunner {
   }
 
   private readOutputFilters(value: unknown): loomOutputFilterConfig | undefined {
+    if (!isCompileFeatureAllowed("output-filters")) {
+      return undefined;
+    }
     if (value == null) {
       return undefined;
     }

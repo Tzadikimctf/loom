@@ -38,6 +38,7 @@ export const DEFAULT_SETTINGS: loomPluginSettings = {
   writeOutputToNote: false,
   outputVisibleLines: 0,
   autoRunOnFileOpen: false,
+  hashCodeBlocks: false,
   showObsidianContextWarning: true,
   extractedSourcePreviewMode: "collapsed",
   showLanguageCapabilityMetadata: true,
