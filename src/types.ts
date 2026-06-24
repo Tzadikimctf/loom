@@ -155,6 +155,26 @@ export interface loomPluginSettings {
   externalLanguagePacks: loomExternalLanguagePack[];
   customLanguages: loomCustomLanguage[];
   pdfExportMode: "both" | "code" | "output";
+  loggingEnabled: boolean;
+  loggingGlobalTextEnabled: boolean;
+  loggingGlobalTextPath: string;
+  loggingGlobalJsonlEnabled: boolean;
+  loggingGlobalJsonlPath: string;
+  loggingPerNoteTextEnabled: boolean;
+  loggingPerNoteTextPathPattern: string;
+  loggingPerNoteJsonlEnabled: boolean;
+  loggingPerNoteJsonlPathPattern: string;
+  loggingProcessEnabled: boolean;
+  loggingProcessCommand: string;
+  loggingHttpEnabled: boolean;
+  loggingHttpEndpoint: string;
+  loggingHttpHeaders: string;
+  loggingNotePathMode: "plain" | "hash" | "omit";
+  loggingIncludeCode: boolean;
+  loggingIncludeOutput: boolean;
+  loggingIncludeInput: boolean;
+  loggingMaxEventBytes: number;
+  loggingMachineId: string;
   defaultContainerGroup: string;
 }
 

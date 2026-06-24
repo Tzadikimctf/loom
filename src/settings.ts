@@ -11,6 +11,7 @@ import {
   isLightCompileMode,
 } from "./buildProfile";
 import { CUSTOM_LANGUAGE_PACKAGE_ID, getAvailableLanguagePackages, getDefaultLanguageIds, getDefaultLanguagePackIds, isLanguageEnabled, normalizeLanguageConfiguration } from "./languagePackages";
+import { sha256Hash } from "./utils/hash";
 import type { loomCustomLanguage, loomPluginSettings } from "./types";
 
 export { DEFAULT_SETTINGS } from "./defaultSettings";
@@ -27,6 +28,7 @@ export class loomSettingTab extends PluginSettingTab {
     containerEl.createEl("p", { text: "Run supported code fences directly from notes while preserving native syntax highlighting." });
 
     this.renderGeneralSettings(this.createSection(containerEl, "General Settings", true));
+    this.renderLoggingSettings(this.createSection(containerEl, "Logging"));
     this.renderLanguagePackages(this.createSection(containerEl, "Language Packages"));
     this.renderBuiltInRuntimes(this.createSection(containerEl, "Built-in Runtimes"));
     if (isCompileCustomLanguagesAllowed()) {
@@ -193,6 +195,145 @@ export class loomSettingTab extends PluginSettingTab {
             this.loomPlugin.settings.pdfExportMode = value as "both" | "code" | "output";
             await this.loomPlugin.saveSettings();
           }),
+      );
+  }
+
+  private renderLoggingSettings(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Enable logging")
+      .setDesc("Write Loom execution, note modification, reproducibility, and settings events to configured sinks.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.loggingEnabled).onChange(async (value) => {
+          this.loomPlugin.settings.loggingEnabled = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Machine hash")
+      .setDesc(`Stable machine/install identifier emitted in logs: ${sha256Hash(this.loomPlugin.settings.loggingMachineId).slice(0, 16)}`);
+
+    new Setting(containerEl)
+      .setName("Global text log")
+      .setDesc("Append human-readable events to a vault-relative text file.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.loggingGlobalTextEnabled).onChange(async (value) => {
+          this.loomPlugin.settings.loggingGlobalTextEnabled = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+    this.addTextSetting(containerEl, "Global text log path", "Vault-relative path for the text log.", "loggingGlobalTextPath");
+
+    new Setting(containerEl)
+      .setName("Global JSONL log")
+      .setDesc("Append structured JSON Lines events to a vault-relative file.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.loggingGlobalJsonlEnabled).onChange(async (value) => {
+          this.loomPlugin.settings.loggingGlobalJsonlEnabled = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+    this.addTextSetting(containerEl, "Global JSONL log path", "Vault-relative path for structured logs.", "loggingGlobalJsonlPath");
+
+    new Setting(containerEl)
+      .setName("Per-note text logs")
+      .setDesc("Append human-readable events to a per-note log. Pattern supports {note} and {hash}.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.loggingPerNoteTextEnabled).onChange(async (value) => {
+          this.loomPlugin.settings.loggingPerNoteTextEnabled = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+    this.addTextSetting(containerEl, "Per-note text path pattern", "Example: .loom/logs/notes/{note}.log", "loggingPerNoteTextPathPattern");
+
+    new Setting(containerEl)
+      .setName("Per-note JSONL logs")
+      .setDesc("Append structured events to a per-note log. Pattern supports {note} and {hash}.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.loggingPerNoteJsonlEnabled).onChange(async (value) => {
+          this.loomPlugin.settings.loggingPerNoteJsonlEnabled = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+    this.addTextSetting(containerEl, "Per-note JSONL path pattern", "Example: .loom/logs/notes/{note}.jsonl", "loggingPerNoteJsonlPathPattern");
+
+    new Setting(containerEl)
+      .setName("Local process sink")
+      .setDesc("Start a local command and stream JSONL events to its stdin.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.loggingProcessEnabled).onChange(async (value) => {
+          this.loomPlugin.settings.loggingProcessEnabled = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+    this.addTextSetting(containerEl, "Local process command", "Example: /usr/local/bin/loom-log-agent --stdin-jsonl", "loggingProcessCommand");
+
+    new Setting(containerEl)
+      .setName("HTTP remote sink")
+      .setDesc("POST each structured event as JSON to a remote endpoint.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.loggingHttpEnabled).onChange(async (value) => {
+          this.loomPlugin.settings.loggingHttpEnabled = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+    this.addTextSetting(containerEl, "HTTP endpoint", "Example: https://collector.example.com/loom/events", "loggingHttpEndpoint");
+    this.addTextSetting(containerEl, "HTTP headers JSON", "Optional JSON object of string headers.", "loggingHttpHeaders");
+
+    new Setting(containerEl)
+      .setName("Note path in logs")
+      .setDesc("Hash paths by default to reduce accidental disclosure.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("hash", "Hash")
+          .addOption("plain", "Plain")
+          .addOption("omit", "Omit")
+          .setValue(this.loomPlugin.settings.loggingNotePathMode)
+          .onChange(async (value) => {
+            this.loomPlugin.settings.loggingNotePathMode = value as "plain" | "hash" | "omit";
+            await this.loomPlugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Include code")
+      .setDesc("Include code block source in structured events. Disabled by default.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.loggingIncludeCode).onChange(async (value) => {
+          this.loomPlugin.settings.loggingIncludeCode = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+    new Setting(containerEl)
+      .setName("Include stdin/function input")
+      .setDesc("Include runtime input in structured events. Disabled by default.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.loggingIncludeInput).onChange(async (value) => {
+          this.loomPlugin.settings.loggingIncludeInput = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+    new Setting(containerEl)
+      .setName("Include output streams")
+      .setDesc("Include stdout, stderr, and warnings in structured events. Disabled by default.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.loomPlugin.settings.loggingIncludeOutput).onChange(async (value) => {
+          this.loomPlugin.settings.loggingIncludeOutput = value;
+          await this.loomPlugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Max event bytes")
+      .setDesc("Large structured events are truncated to metadata when they exceed this size.")
+      .addText((text) =>
+        text.setValue(String(this.loomPlugin.settings.loggingMaxEventBytes)).onChange(async (value) => {
+          const parsed = Number.parseInt(value.trim(), 10);
+          if (!Number.isNaN(parsed) && parsed > 0) {
+            this.loomPlugin.settings.loggingMaxEventBytes = parsed;
+            await this.loomPlugin.saveSettings();
+          }
+        }),
       );
   }
 
