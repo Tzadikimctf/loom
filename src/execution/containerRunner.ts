@@ -32,6 +32,7 @@ interface lotusQemuConfig {
   sshAuthSock?: string;
   scpExecutable?: string;
   scpArgs?: string;
+  uploadMode?: lotusRemoteUploadMode;
   cleanupRemoteFile?: boolean;
   startCommand?: string;
   buildCommand?: string;
@@ -48,11 +49,14 @@ interface lotusRemoteConfig {
   sshAuthSock?: string;
   scpExecutable?: string;
   scpArgs?: string;
+  uploadMode?: lotusRemoteUploadMode;
   cleanupRemoteFile?: boolean;
   mkdirCommand?: string;
   cleanupCommand?: string;
   healthCheck?: lotusCommandExpectation;
 }
+
+type lotusRemoteUploadMode = "inline" | "scp";
 
 interface lotusQemuManagerConfig {
   enabled: boolean;
@@ -436,16 +440,21 @@ export class lotusContainerRunner {
     context: lotusRunContext,
   ): Promise<lotusRunResult> {
     const remoteFile = posixPath.join(remote.workspace, tempFileName);
+    const remoteCommand = this.applyCommandPrefix(config, language.command!.replaceAll("{file}", shellQuote(remoteFile)));
+    if (!remoteCommand.trim()) {
+      throw new Error(`${runnerName} command is empty.`);
+    }
+
+    if (remote.uploadMode !== "scp") {
+      return this.runRemoteLanguageInline(groupName, groupPath, runtimeId, runnerName, remote, remoteCommand, tempFilePath, remoteFile, context);
+    }
+
     await this.ensureRemoteWorkspace(groupName, groupPath, runtimeId, runnerName, remote, context.timeoutMs, context.signal);
     await this.runRemoteHealthCheck(groupName, groupPath, runtimeId, runnerName, remote, context.timeoutMs, context.signal);
     await this.uploadRemoteFile(groupName, groupPath, runtimeId, runnerName, remote, tempFilePath, remoteFile, context.timeoutMs, context.signal);
 
     let result: lotusRunResult | undefined;
     try {
-      const remoteCommand = this.applyCommandPrefix(config, language.command!.replaceAll("{file}", shellQuote(remoteFile)));
-      if (!remoteCommand.trim()) {
-        throw new Error(`${runnerName} command is empty.`);
-      }
       result = await this.runRemoteCommand(
         groupName,
         groupPath,
@@ -455,6 +464,7 @@ export class lotusContainerRunner {
         `cd ${shellQuote(remote.workspace)} && ${remoteCommand}`,
         context.timeoutMs,
         context.signal,
+        undefined,
         context.stdin,
         context.stdinSession,
         context.onStdout,
@@ -471,6 +481,93 @@ export class lotusContainerRunner {
         }
       }
     }
+  }
+
+  private async runRemoteLanguageInline(
+    groupName: string,
+    groupPath: string,
+    runtimeId: "ssh" | "qemu",
+    runnerName: string,
+    remote: lotusRemoteConfig,
+    remoteCommand: string,
+    tempFilePath: string,
+    remoteFile: string,
+    context: lotusRunContext,
+  ): Promise<lotusRunResult> {
+    const source = await readFile(tempFilePath, "utf8");
+    const command = this.buildInlineRemoteCommand(remote, remoteCommand, remoteFile, Buffer.byteLength(source, "utf8"));
+    return this.runRemoteCommand(
+      groupName,
+      groupPath,
+      runtimeId,
+      runnerName,
+      remote,
+      command,
+      context.timeoutMs,
+      context.signal,
+      source,
+      context.stdin,
+      context.stdinSession,
+      context.onStdout,
+      context.onStderr,
+      "run",
+    );
+  }
+
+  private buildInlineRemoteCommand(remote: lotusRemoteConfig, remoteCommand: string, remoteFile: string, sourceByteLength: number): string {
+    const mkdirCommand = (remote.mkdirCommand || "mkdir -p {workspace}").replaceAll("{workspace}", shellQuote(remote.workspace));
+    const cleanupCommand = (remote.cleanupCommand || "rm -f {file}").replaceAll("{file}", shellQuote(remoteFile));
+    const lines = [
+      "set +e",
+      mkdirCommand,
+      "__lotus_status=$?",
+      "if [ \"$__lotus_status\" -ne 0 ]; then exit \"$__lotus_status\"; fi",
+      ...this.buildInlineRemoteHealthCheck(remote.healthCheck),
+      `dd of=${shellQuote(remoteFile)} bs=1 count=${sourceByteLength} 2>/dev/null`,
+      "__lotus_status=$?",
+      "if [ \"$__lotus_status\" -ne 0 ]; then printf '%s\\n' 'Lotus remote upload failed.' >&2; exit \"$__lotus_status\"; fi",
+      `cd ${shellQuote(remote.workspace)}`,
+      "__lotus_status=$?",
+      "if [ \"$__lotus_status\" -ne 0 ]; then exit \"$__lotus_status\"; fi",
+      remoteCommand,
+      "__lotus_run_status=$?",
+    ];
+
+    if (remote.cleanupRemoteFile !== false) {
+      lines.push(
+        cleanupCommand,
+        "__lotus_cleanup_status=$?",
+        "if [ \"$__lotus_cleanup_status\" -ne 0 ]; then printf '%s\\n' 'Lotus remote cleanup failed.' >&2; fi",
+      );
+    }
+
+    lines.push("exit \"$__lotus_run_status\"");
+    return lines.join("\n");
+  }
+
+  private buildInlineRemoteHealthCheck(healthCheck: lotusCommandExpectation | undefined): string[] {
+    if (!healthCheck) {
+      return [];
+    }
+
+    const lines = [
+      `__lotus_health_output="$({ ${healthCheck.command}; } 2>&1)"`,
+      "__lotus_health_status=$?",
+      "if [ \"$__lotus_health_status\" -ne 0 ]; then printf '%s\\n' 'Lotus remote health check failed.' >&2; printf '%s\\n' \"$__lotus_health_output\" >&2; exit \"$__lotus_health_status\"; fi",
+    ];
+
+    if (healthCheck.negativeResponse) {
+      lines.push(
+        `if printf '%s' "$__lotus_health_output" | grep -F -- ${shellQuote(healthCheck.negativeResponse)} >/dev/null; then printf '%s\\n' ${shellQuote(`Lotus remote health check returned negative response: ${healthCheck.negativeResponse}`)} >&2; exit 1; fi`,
+      );
+    }
+    if (healthCheck.positiveResponse) {
+      lines.push(
+        `if ! printf '%s' "$__lotus_health_output" | grep -F -- ${shellQuote(healthCheck.positiveResponse)} >/dev/null; then printf '%s\\n' ${shellQuote(`Lotus remote health check did not return positive response: ${healthCheck.positiveResponse}`)} >&2; exit 1; fi`,
+      );
+    }
+
+    return lines;
   }
 
   private async runCustom(
@@ -568,6 +665,7 @@ export class lotusContainerRunner {
       sshAuthSock: qemu.sshAuthSock,
       scpExecutable: qemu.scpExecutable,
       scpArgs: qemu.scpArgs,
+      uploadMode: qemu.uploadMode,
       cleanupRemoteFile: qemu.cleanupRemoteFile,
     };
   }
@@ -582,7 +680,7 @@ export class lotusContainerRunner {
     signal: AbortSignal,
   ): Promise<void> {
     const command = (remote.mkdirCommand || "mkdir -p {workspace}").replaceAll("{workspace}", shellQuote(remote.workspace));
-    const result = await this.runRemoteCommand(groupName, groupPath, runtimeId, `${runnerName} mkdir`, remote, command, timeoutMs, signal, undefined, undefined, undefined, undefined, "mkdir");
+    const result = await this.runRemoteCommand(groupName, groupPath, runtimeId, `${runnerName} mkdir`, remote, command, timeoutMs, signal, undefined, undefined, undefined, undefined, undefined, "mkdir");
     if (!result.success) {
       throw new Error(`${runnerName} workspace setup failed: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`);
     }
@@ -600,7 +698,7 @@ export class lotusContainerRunner {
     if (!remote.healthCheck) {
       return;
     }
-    const result = await this.runRemoteCommand(groupName, groupPath, runtimeId, `${runnerName} remote health check`, remote, remote.healthCheck.command, timeoutMs, signal, undefined, undefined, undefined, undefined, "health");
+    const result = await this.runRemoteCommand(groupName, groupPath, runtimeId, `${runnerName} remote health check`, remote, remote.healthCheck.command, timeoutMs, signal, undefined, undefined, undefined, undefined, undefined, "health");
     const combinedOutput = `${result.stdout}\n${result.stderr}`;
     if (!result.success) {
       throw new Error(`${runnerName} remote health check failed: ${result.stderr || result.stdout || `exit ${result.exitCode}`}`);
@@ -654,7 +752,7 @@ export class lotusContainerRunner {
     signal: AbortSignal,
   ): Promise<lotusRunResult> {
     const command = (remote.cleanupCommand || "rm -f {file}").replaceAll("{file}", shellQuote(remoteFile));
-    return this.runRemoteCommand(groupName, groupPath, runtimeId, `${runnerName} cleanup`, remote, command, timeoutMs, signal, undefined, undefined, undefined, undefined, "cleanup");
+    return this.runRemoteCommand(groupName, groupPath, runtimeId, `${runnerName} cleanup`, remote, command, timeoutMs, signal, undefined, undefined, undefined, undefined, undefined, "cleanup");
   }
 
   private async runRemoteCommand(
@@ -666,6 +764,7 @@ export class lotusContainerRunner {
     command: string,
     timeoutMs: number,
     signal: AbortSignal,
+    stdinPrefix: string | Buffer | undefined,
     stdin: string | undefined,
     stdinSession: lotusRunContext["stdinSession"] | undefined,
     onStdout: lotusRunContext["onStdout"] | undefined,
@@ -684,6 +783,7 @@ export class lotusContainerRunner {
       workingDirectory: groupPath,
       timeoutMs,
       signal,
+      stdinPrefix,
       stdin,
       stdinSession,
       onStdout,
@@ -925,6 +1025,7 @@ export class lotusContainerRunner {
       sshAuthSock: optionalString(data.sshAuthSock ?? data.authSock ?? data.sshAgentSocket),
       scpExecutable: optionalString(data.scpExecutable),
       scpArgs: optionalString(data.scpArgs),
+      uploadMode: optionalUploadMode(data.uploadMode),
       cleanupRemoteFile: typeof data.cleanupRemoteFile === "boolean" ? data.cleanupRemoteFile : undefined,
       mkdirCommand: optionalString(data.mkdirCommand),
       cleanupCommand: optionalString(data.cleanupCommand),
@@ -977,6 +1078,7 @@ export class lotusContainerRunner {
       sshAuthSock: optionalString(data.sshAuthSock ?? data.authSock ?? data.sshAgentSocket),
       scpExecutable: optionalString(data.scpExecutable),
       scpArgs: optionalString(data.scpArgs),
+      uploadMode: optionalUploadMode(data.uploadMode),
       cleanupRemoteFile: typeof data.cleanupRemoteFile === "boolean" ? data.cleanupRemoteFile : undefined,
       startCommand: optionalString(data.startCommand),
       buildCommand: optionalString(data.buildCommand),
@@ -1765,6 +1867,26 @@ function runtimeLabel(runtime: lotusContainerRuntime): string {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function heredocDelimiter(source: string): string {
+  let suffix = 0;
+  let delimiter = `__LOTUS_REMOTE_SOURCE_${Date.now().toString(36)}_${Math.random().toString(16).slice(2)}__`;
+  while (source.includes(delimiter)) {
+    suffix += 1;
+    delimiter = `__LOTUS_REMOTE_SOURCE_${Date.now().toString(36)}_${Math.random().toString(16).slice(2)}_${suffix}__`;
+  }
+  return delimiter;
+}
+
+function optionalUploadMode(value: unknown): lotusRemoteUploadMode | undefined {
+  if (value == null || value === "") {
+    return undefined;
+  }
+  if (value === "inline" || value === "scp") {
+    return value;
+  }
+  throw new Error("Remote upload mode must be inline or scp.");
 }
 
 function quoteCommandArg(value: string): string {

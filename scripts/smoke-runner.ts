@@ -25,6 +25,7 @@ import { ProofRunner } from "../src/runners/proof";
 import { CustomLanguageRunner } from "../src/runners/custom";
 import { lotusRunnerRegistry } from "../src/runners/registry";
 import { lotusContainerRunner } from "../src/execution/containerRunner";
+import { runProcess } from "../src/execution/processRunner";
 import type { lotusCodeBlock, lotusPluginSettings, lotusResolvedExecutionContext, lotusRunResult, lotusSourcePreview } from "../src/types";
 
 type SmokeProfile = "minimal" | "systems" | "proofs" | "ebpf" | "full";
@@ -90,6 +91,7 @@ for (const note of notes) {
     results.push(await runBlock(note, block));
   }
 }
+results.push(...await runTransportSmoke());
 results.push(...await runSigningSmoke());
 
 await mkdir(artifactDir, { recursive: true });
@@ -261,6 +263,39 @@ async function runSigningSmoke(): Promise<SmokeBlockResult[]> {
         }
       } finally {
         await rm(tempDir, { recursive: true, force: true });
+      }
+    }),
+  ];
+}
+
+async function runTransportSmoke(): Promise<SmokeBlockResult[]> {
+  return [
+    await runSyntheticSmoke("transport-stdin-prefix", async () => {
+      const controller = new AbortController();
+      const result = await runProcess({
+        runnerId: "synthetic:transport:stdin-prefix",
+        runnerName: "Synthetic stdin prefix",
+        executable: process.execPath,
+        args: [
+          "-e",
+          [
+            "let data = '';",
+            "process.stdin.setEncoding('utf8');",
+            "process.stdin.on('data', chunk => { data += chunk; });",
+            "process.stdin.on('end', () => {",
+            "  if (data !== 'lotus-source-user-input') process.exit(2);",
+            "  process.stdout.write(data);",
+            "});",
+          ].join("\n"),
+        ],
+        workingDirectory: vaultDir,
+        timeoutMs: 5000,
+        signal: controller.signal,
+        stdinPrefix: "lotus-source-",
+        stdin: "user-input",
+      });
+      if (!result.success || result.stdout !== "lotus-source-user-input") {
+        throw new Error(result.stderr || `stdin prefix smoke failed: ${result.stdout || `exit ${result.exitCode}`}`);
       }
     }),
   ];

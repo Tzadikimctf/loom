@@ -556,7 +556,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-run-current-code-block",
+      id: "run-current-code-block",
       name: "lotus: Run Current Code Block",
       editorCallback: async (editor, view) => {
         const file = view.file;
@@ -575,7 +575,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-run-all-code-blocks",
+      id: "run-all-code-blocks",
       name: "lotus: Run All Supported Code Blocks in Current Note",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
@@ -590,7 +590,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-cancel-current-code-block",
+      id: "cancel-current-code-block",
       name: "lotus: Cancel Current Code Block Run",
       editorCheckCallback: (checking, editor, view) => {
         const file = view.file;
@@ -610,7 +610,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-cancel-all-code-blocks",
+      id: "cancel-all-code-blocks",
       name: "lotus: Cancel All Running Code Blocks",
       checkCallback: (checking) => {
         if (!this.running.size) {
@@ -624,7 +624,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-open-log-viewer",
+      id: "open-log-viewer",
       name: "lotus: Open Log Viewer",
       callback: () => {
         void this.openLogView();
@@ -632,8 +632,8 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-clear-note-outputs",
-      name: "lotus: Clear lotus Outputs in Current Note",
+      id: "clear-note-outputs",
+      name: "lotus: Clear Lotus Outputs in Current Note",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
         if (!file) {
@@ -647,7 +647,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-save-reproducibility-snapshot",
+      id: "save-reproducibility-snapshot",
       name: "lotus: Save Reproducibility Snapshot",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
@@ -662,7 +662,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-verify-reproducibility-snapshot",
+      id: "verify-reproducibility-snapshot",
       name: "lotus: Verify Reproducibility Snapshot",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
@@ -677,7 +677,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-set-reproducibility-policy",
+      id: "set-reproducibility-policy",
       name: "lotus: Set Reproducibility Policy",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
@@ -692,7 +692,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-copy-reproducibility-snapshot",
+      id: "copy-reproducibility-snapshot",
       name: "lotus: Copy Reproducibility Snapshot",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
@@ -708,7 +708,7 @@ export default class lotusPlugin extends Plugin {
 
     if (isCompileFeatureAllowed("signing")) {
       this.addCommand({
-        id: "lotus-sign-current-note",
+        id: "sign-current-note",
         name: "lotus: Sign Current Note",
         checkCallback: (checking) => {
           const file = this.getActiveMarkdownFile();
@@ -723,7 +723,7 @@ export default class lotusPlugin extends Plugin {
       });
 
       this.addCommand({
-        id: "lotus-verify-current-note-signature",
+        id: "verify-current-note-signature",
         name: "lotus: Verify Current Note Signature",
         checkCallback: (checking) => {
           const file = this.getActiveMarkdownFile();
@@ -738,7 +738,7 @@ export default class lotusPlugin extends Plugin {
       });
 
       this.addCommand({
-        id: "lotus-copy-current-note-signature",
+        id: "copy-current-note-signature",
         name: "lotus: Copy Current Note Signature",
         checkCallback: (checking) => {
           const file = this.getActiveMarkdownFile();
@@ -753,7 +753,7 @@ export default class lotusPlugin extends Plugin {
       });
 
       this.addCommand({
-        id: "lotus-sign-all-notes",
+        id: "sign-all-notes",
         name: "lotus: Sign All Notes",
         callback: () => {
           void this.signAllNotes();
@@ -761,7 +761,7 @@ export default class lotusPlugin extends Plugin {
       });
 
       this.addCommand({
-        id: "lotus-verify-all-note-signatures",
+        id: "verify-all-note-signatures",
         name: "lotus: Verify All Note Signatures",
         callback: () => {
           void this.verifyAllNoteSignatures();
@@ -771,7 +771,7 @@ export default class lotusPlugin extends Plugin {
     }
 
     this.addCommand({
-      id: "lotus-copy-note-hash",
+      id: "copy-note-hash",
       name: "lotus: Copy Note Hash",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
@@ -786,7 +786,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-copy-verification-report",
+      id: "copy-verification-report",
       name: "lotus: Copy Reproducibility Verification Report",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
@@ -801,7 +801,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-hash-current-note",
+      id: "hash-current-note",
       name: "lotus: Hash Current Note",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
@@ -816,7 +816,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-verify-current-note-hash",
+      id: "verify-current-note-hash",
       name: "lotus: Verify Current Note Hash",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
@@ -831,7 +831,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-hash-current-code-block",
+      id: "hash-current-code-block",
       name: "lotus: Hash Current Code Block",
       checkCallback: (checking) => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -846,7 +846,7 @@ export default class lotusPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: "lotus-verify-code-block-hashes",
+      id: "verify-code-block-hashes",
       name: "lotus: Verify Code Block Hashes in Current Note",
       checkCallback: (checking) => {
         const file = this.getActiveMarkdownFile();
@@ -877,7 +877,7 @@ export default class lotusPlugin extends Plugin {
 
     if (isCompileFeatureAllowed("container-groups")) {
       this.addCommand({
-        id: "lotus-validate-container-groups",
+        id: "validate-container-groups",
         name: "lotus: Validate Container Groups",
         callback: async () => {
           const groups = await this.getContainerGroupSummaries();

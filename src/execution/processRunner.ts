@@ -14,6 +14,7 @@ export interface lotusProcessSpec {
   workingDirectory: string;
   timeoutMs: number;
   signal: AbortSignal;
+  stdinPrefix?: string | Buffer;
   stdin?: string;
   stdinSession?: lotusStdinSession;
   onStdout?: (chunk: string) => void;
@@ -136,6 +137,9 @@ export async function runProcess(spec: lotusProcessSpec): Promise<lotusRunResult
           reject(error);
         }
       });
+      if (spec.stdinPrefix != null) {
+        child.stdin?.write(spec.stdinPrefix);
+      }
       if (spec.stdin != null) {
         child.stdin?.end(spec.stdin);
       } else if (spec.stdinSession) {
@@ -149,6 +153,8 @@ export async function runProcess(spec: lotusProcessSpec): Promise<lotusRunResult
           }
           child.stdin.write(chunk);
         });
+      } else if (spec.stdinPrefix != null) {
+        child.stdin?.end();
       } else {
         child.stdin?.destroy();
       }

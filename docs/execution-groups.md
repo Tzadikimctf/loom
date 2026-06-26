@@ -96,12 +96,12 @@ Lotus supports the following runtimes under `"runtime"` in `config.json`:
 
 - `"docker"` / `"podman"`: Standard OCI container execution that mounts the group folder and runs your block command. If a `Dockerfile` exists inside the group folder, Lotus builds and uses that image.
 - `"wsl"`: Runs commands inside Windows Subsystem for Linux. You can specify a WSL distribution name in the `"image"` field, or omit it to run in your default WSL distro.
-- `"ssh"`: Runs commands on a remote SSH target after uploading the temporary source file with SCP.
+- `"ssh"`: Runs commands on a remote SSH target through an SSH session.
 - `"qemu"`: Runs commands on a remote VM using SSH, with optional automated QEMU local process management.
 - `"custom"`: Delegates container building, running, and teardown to a custom local executable wrapper.
 
 ### SSH Runtime Configuration
-Remote SSH execution is configured with `"runtime": "ssh"` (or `"remote"`). Lotus writes the snippet locally, creates the remote workspace, uploads the temp source file via `scp`, runs the configured command over `ssh`, and removes the remote temp file afterward (unless cleanup is disabled).
+Remote SSH execution is configured with `"runtime": "ssh"` (or `"remote"`). By default, Lotus creates the remote workspace, writes the temp source file, runs the configured command, and removes the remote temp file through one `ssh` session. That avoids repeated password prompts and keeps stdin available for interactive programs.
 
 ```json
 {
@@ -111,7 +111,7 @@ Remote SSH execution is configured with `"runtime": "ssh"` (or `"remote"`). Lotu
     "workspace": "/tmp/lotus",
     "sshArgs": "-p 2222",
     "sshAuthSock": "/path/to/agent.sock",
-    "scpArgs": "-P 2222",
+    "uploadMode": "inline",
     "cleanupRemoteFile": true,
     "healthCheck": {
       "command": "uname -a",
@@ -132,11 +132,13 @@ Remote SSH execution is configured with `"runtime": "ssh"` (or `"remote"`). Lotu
 }
 ```
 
-Define `sshAuthSock` if the group should use a specific SSH agent socket (e.g., Bitwarden). Lotus does not store keys or prompt for passphrases; it only passes `SSH_AUTH_SOCK` to the `ssh` and `scp` processes. QEMU uses the same upload/run/cleanup transport, so QEMU configs can also set `scpExecutable`, `scpArgs`, `sshAuthSock`, and `cleanupRemoteFile`.
+Define `sshAuthSock` if the group should use a specific SSH agent socket (e.g., Bitwarden). Lotus does not store keys or prompt for passphrases; it only passes `SSH_AUTH_SOCK` to the `ssh` process. QEMU uses the same remote transport, so QEMU configs can also set `uploadMode`, `scpExecutable`, `scpArgs`, `sshAuthSock`, and `cleanupRemoteFile`.
+
+Set `"uploadMode": "scp"` only when the remote shell cannot handle inline uploads. In that compatibility mode, Lotus falls back to separate `ssh`, `scp`, `ssh`, and cleanup processes, so password authentication may prompt more than once unless your SSH agent or connection config handles it.
 
 ### Jump Hosts and SSH Config
 
-Lotus does not implement its own SSH transport. It delegates to your installed `ssh` and `scp`, so jump hosts, bastions, hardware tokens, agent forwarding, host key policy, and corporate SSH configuration should live in `~/.ssh/config` or in the group's SSH arguments.
+Lotus does not implement its own SSH transport. It delegates to your installed `ssh` client, and to `scp` only in SCP compatibility mode. Jump hosts, bastions, hardware tokens, agent forwarding, host key policy, and corporate SSH configuration should live in `~/.ssh/config` or in the group's SSH arguments.
 
 The most maintainable setup is an SSH host alias:
 
@@ -158,7 +160,6 @@ Then the Lotus group can reference the alias directly:
     "target": "prod-runner",
     "workspace": "/tmp/lotus",
     "sshArgs": "-o BatchMode=yes",
-    "scpArgs": "",
     "cleanupRemoteFile": true
   },
   "languages": {
@@ -169,7 +170,7 @@ Then the Lotus group can reference the alias directly:
 }
 ```
 
-If you do not want to use an SSH config alias, put the jump options in both `sshArgs` and `scpArgs`:
+If you do not want to use an SSH config alias, put the jump options in `sshArgs`:
 
 ```json
 {
@@ -178,7 +179,6 @@ If you do not want to use an SSH config alias, put the jump options in both `ssh
     "target": "lotus@runner.internal",
     "workspace": "/tmp/lotus",
     "sshArgs": "-J bastion.example.com -o BatchMode=yes",
-    "scpArgs": "-J bastion.example.com",
     "cleanupRemoteFile": true
   },
   "languages": {

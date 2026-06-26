@@ -1253,6 +1253,19 @@ class EditContainerGroupModal extends Modal {
     }
 
     new Setting(containerEl)
+      .setName("Remote upload mode")
+      .setDesc("Inline SSH uses one SSH session per run, so password prompts happen once and interactive stdin stays available. Use SCP compatibility only when the remote shell cannot handle inline uploads.")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("inline", "Inline SSH")
+          .addOption("scp", "SCP compatibility")
+          .setValue(remoteConfig.uploadMode || "inline")
+          .onChange((value) => {
+            remoteConfig.uploadMode = value === "scp" ? "scp" : undefined;
+          });
+      });
+
+    new Setting(containerEl)
       .setName("SSH auth socket")
       .setDesc("Optional. Override SSH_AUTH_SOCK for this group, useful for Bitwarden or another SSH agent.")
       .addText((text) => {
@@ -1266,7 +1279,7 @@ class EditContainerGroupModal extends Modal {
 
     new Setting(containerEl)
       .setName("SCP Executable")
-      .setDesc("Optional. Path to SCP executable, defaults to scp.")
+      .setDesc("Optional. Path to SCP executable, defaults to scp. Used only when remote upload mode is SCP compatibility.")
       .addText((text) => {
         text
           .setValue(remoteConfig.scpExecutable || "")
@@ -1277,7 +1290,7 @@ class EditContainerGroupModal extends Modal {
 
     new Setting(containerEl)
       .setName("SCP Arguments")
-      .setDesc("Optional. Additional SCP CLI flags. Use -P for ports with OpenSSH scp.")
+      .setDesc("Optional. Additional SCP CLI flags. Use -P for ports with OpenSSH scp. Used only when remote upload mode is SCP compatibility.")
       .addText((text) => {
         text
           .setValue(remoteConfig.scpArgs || "")

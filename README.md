@@ -19,7 +19,7 @@ That ID is used for output replacement and toolbar state. Rerunning a block upda
 ## Installation
 
 ### Via Community Plugins
-lotus isn't in the plugin repository by design. It is intended for users that plan to run code in their vaults, therefore we expect them to at least be able to install it manually.
+If Lotus is listed in the Community Plugins directory, install it from **Settings > Community plugins > Browse**.
 
 ### Manual Installation
 1. Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
@@ -33,6 +33,27 @@ Lotus executes code blocks locally on your machine without sandboxing or isolati
 
 > [!CAUTION]
 > Running code blocks in untrusted notes can execute malicious commands on your host machine. Lotus displays a consent modal before allowing local execution. For security isolation, consider setting up [Execution Groups](docs/execution-groups.md) to run code inside Docker/Podman containers or remote SSH/QEMU environments.
+
+### Community Directory Disclosures
+
+Lotus is desktop-only because it uses Node.js APIs and local processes for code execution, hashing, signing, logging, and toolchain integration.
+
+Lotus does not include client-side telemetry, dynamic ads, static ads, or a self-updater. It does not send data to a remote service unless you configure a feature that requires one.
+
+Optional features that can use the network:
+
+- SSH and QEMU execution groups connect to the targets you configure.
+- Docker and Podman execution groups may pull images if your local runtime is configured to do so.
+- The HTTP logging sink posts structured execution events to the endpoint you configure.
+
+Optional features that can access files or processes outside the vault:
+
+- Native code execution runs local interpreters, compilers, and helper processes.
+- Execution groups can run Docker, Podman, WSL, SSH, QEMU, or custom wrapper commands.
+- OpenSSH signing can call `ssh-keygen` and use configured key files or `SSH_AUTH_SOCK`.
+- Logging can write to vault-relative files, per-note files, or a local process sink that you configure.
+
+Lotus is licensed under the MIT license. See [LICENSE](LICENSE).
 
 ## Quick Start
 

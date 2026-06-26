@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Obsidian plugin for running normal fenced code blocks with native syntax highlighting.",
   "author": "James Karlsson and Thomas Goldman",
+  "license": "MIT",
   "main": "main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit && node esbuild.config.mjs",
