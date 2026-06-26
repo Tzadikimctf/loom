@@ -131,6 +131,7 @@ For more specialized setups, refer to the guides in the [docs/](docs/) directory
 - [Hashing & Reproducibility](docs/reproducibility.md): Verify notes and code blocks against snapshots to guarantee document reproducibility.
 - [Observability, Logging, and Signing](docs/observability.md): Configure local/remote logs, redaction rules, log viewing, live input, and note signatures.
 - [Developer Guide](docs/development.md): Runner API contracts, Obsidian context (`obsidian-js`) integrations, and the smoke testing suite.
+* [Process](docs/process.md) Branch model PR expectations and release tagging checklist
 
 ## Commands Reference
 
