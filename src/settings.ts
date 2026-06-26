@@ -24,7 +24,7 @@ export class lotusSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "lotus" });
+    new Setting(containerEl).setName("lotus").setHeading();
     containerEl.createEl("p", { text: "Run supported code fences directly from notes while preserving native syntax highlighting." });
 
     this.renderGeneralSettings(this.createSection(containerEl, "General Settings", true));
@@ -236,8 +236,10 @@ export class lotusSettingTab extends PluginSettingTab {
             await this.lotusPlugin.saveSettings();
           });
           text.inputEl.rows = 5;
-          text.inputEl.style.fontFamily = "monospace";
-          text.inputEl.style.width = "100%";
+          text.inputEl.setCssStyles({
+            fontFamily: "monospace",
+            width: "100%",
+          });
         });
     }
     if (this.lotusPlugin.settings.signingMode === "ssh") {
@@ -254,8 +256,10 @@ export class lotusSettingTab extends PluginSettingTab {
             await this.lotusPlugin.saveSettings();
           });
           text.inputEl.rows = 5;
-          text.inputEl.style.fontFamily = "monospace";
-          text.inputEl.style.width = "100%";
+          text.inputEl.setCssStyles({
+            fontFamily: "monospace",
+            width: "100%",
+          });
         });
     }
   }
@@ -352,8 +356,10 @@ export class lotusSettingTab extends PluginSettingTab {
           await this.lotusPlugin.saveSettings();
         });
         text.inputEl.rows = 5;
-        text.inputEl.style.fontFamily = "monospace";
-        text.inputEl.style.width = "100%";
+        text.inputEl.setCssStyles({
+          fontFamily: "monospace",
+          width: "100%",
+        });
       });
 
     new Setting(containerEl)
@@ -562,7 +568,7 @@ export class lotusSettingTab extends PluginSettingTab {
           accept: ".zip,.tar,.tgz,.tar.gz,application/zip,application/x-tar,application/gzip",
         },
       });
-      bundleInput.style.display = "none";
+      bundleInput.setCssStyles({ display: "none" });
       bundleInput.addEventListener("change", async () => {
         const file = bundleInput.files?.[0];
         if (!file) {
@@ -1398,7 +1404,7 @@ class EditContainerGroupModal extends Modal {
       .setDesc(description)
       .addTextArea((text) => {
         text.inputEl.rows = 3;
-        text.inputEl.style.fontFamily = "monospace";
+        text.inputEl.setCssStyles({ fontFamily: "monospace" });
         text.setValue(Array.isArray(filters[key]) ? filters[key].join("\n") : filters[key] || "");
         text.onChange((val) => {
           const values = val.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -1558,8 +1564,10 @@ class EditContainerGroupModal extends Modal {
         .setDesc("Define the build steps for your environment container.")
         .addTextArea((text) => {
           text.inputEl.rows = 15;
-          text.inputEl.style.fontFamily = "monospace";
-          text.inputEl.style.width = "100%";
+          text.inputEl.setCssStyles({
+            fontFamily: "monospace",
+            width: "100%",
+          });
           text.setValue(this.dockerfileText || "");
           text.onChange((val) => {
             this.dockerfileText = val;
@@ -1574,8 +1582,10 @@ class EditContainerGroupModal extends Modal {
       .setName("Configuration JSON")
       .addTextArea((text) => {
         text.inputEl.rows = 15;
-        text.inputEl.style.fontFamily = "monospace";
-        text.inputEl.style.width = "100%";
+        text.inputEl.setCssStyles({
+          fontFamily: "monospace",
+          width: "100%",
+        });
         text.setValue(this.rawJsonText);
         text.onChange((val) => {
           this.rawJsonText = val;
