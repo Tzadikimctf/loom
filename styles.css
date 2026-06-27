@@ -529,20 +529,22 @@
 }
 
 @media print {
-  .lotus-code-toolbar,
-  .lotus-stdin-panel,
-  .lotus-inline-output-host:empty {
-    display: none !important;
+  body .lotus-code-toolbar,
+  body .lotus-stdin-panel,
+  body .lotus-inline-output-host:empty {
+    display: none;
   }
+
   .lotus-output-panel {
     page-break-inside: avoid;
-    break-inside: avoid;
   }
-  .lotus-print-hide-code {
-    display: none !important;
+
+  body .lotus-print-hide-code {
+    display: none;
   }
-  .lotus-print-hide-output {
-    display: none !important;
+
+  body .lotus-print-hide-output {
+    display: none;
   }
 }
 
