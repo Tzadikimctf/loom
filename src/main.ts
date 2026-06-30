@@ -1096,7 +1096,7 @@ export default class lotusPlugin extends Plugin {
     const isFunctionInput = this.isFunctionInputBlock(block);
     return createCodeBlockToolbar(block.id, this.isBlockRunning(block.id), {
       onRun: () => void this.runOrCancelBlockById(block.id),
-      onEdit: () => void this.editBlockById(block.id),
+      onEdit: () => void this.editBlock(block),
       onCopy: () => {
         void navigator.clipboard.writeText(block.content).then(() => {
           new Notice("Code copied");
@@ -1133,6 +1133,10 @@ export default class lotusPlugin extends Plugin {
       return;
     }
 
+    await this.editBlock(block);
+  }
+
+  private async editBlock(block: lotusCodeBlock): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(block.filePath);
     if (!(file instanceof TFile)) {
       new Notice("Could not open the note for this Lotus block.");
@@ -1146,7 +1150,7 @@ export default class lotusPlugin extends Plugin {
       }) ?? this.app.workspace.getLeaf(false);
 
     await leaf.openFile(file);
-    await this.enforceSourceModeForLeaf(leaf);
+    await this.setSourceModeForLeaf(leaf, true);
     leaf = this.app.workspace.getActiveViewOfType(MarkdownView)?.leaf ?? leaf;
 
     const view = leaf.view;
@@ -2750,6 +2754,10 @@ export default class lotusPlugin extends Plugin {
       return;
     }
 
+    await this.setSourceModeForLeaf(leaf, false);
+  }
+
+  private async setSourceModeForLeaf(leaf: WorkspaceLeaf, force: boolean): Promise<void> {
     if (leaf.isDeferred) {
       await leaf.loadIfDeferred();
     }
@@ -2761,7 +2769,7 @@ export default class lotusPlugin extends Plugin {
 
     const source = view.editor?.getValue?.() ?? (await this.app.vault.cachedRead(view.file));
     const blocks = parseMarkdownCodeBlocks(view.file.path, source, this.settings);
-    if (!blocks.length) {
+    if (!force && !blocks.length) {
       return;
     }
 

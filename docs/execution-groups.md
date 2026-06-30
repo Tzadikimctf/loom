@@ -100,6 +100,36 @@ Lotus supports the following runtimes under `"runtime"` in `config.json`:
 - `"qemu"`: Runs commands on a remote VM using SSH, with optional automated QEMU local process management.
 - `"custom"`: Delegates container building, running, and teardown to a custom local executable wrapper.
 
+### Persistent Docker and Podman Containers
+
+Docker and Podman groups can keep one container alive and run each block with `docker exec` or `podman exec`. Enable this when a note needs package installs, generated files, daemons, caches, or other process/container state to survive between block runs.
+
+```json
+{
+  "runtime": "docker",
+  "image": "python:3.12-slim",
+  "persistent": {
+    "enabled": true,
+    "name": "lotus-python-lab",
+    "keepAliveCommand": "sleep infinity"
+  },
+  "languages": {
+    "python": {
+      "command": "python3 {file}",
+      "extension": ".py"
+    },
+    "shell": {
+      "command": "sh {file}",
+      "extension": ".sh"
+    }
+  }
+}
+```
+
+`persistent: true` is accepted as shorthand for `{ "enabled": true }`. If `name` is omitted, Lotus derives a stable name from the execution group. On the first run Lotus creates and starts the container, then later runs reuse it. Remove it manually with `docker rm -f <name>` or `podman rm -f <name>` when you want a clean environment.
+
+Persistent containers always run snippets in `/workspace`, the mounted execution group directory. Per-block `lotus-cwd` values cannot add new bind mounts to an already-created container, so Lotus warns and keeps exec runs in `/workspace`.
+
 ### SSH Runtime Configuration
 Remote SSH execution is configured with `"runtime": "ssh"` (or `"remote"`). By default, Lotus creates the remote workspace, writes the temp source file, runs the configured command, and removes the remote temp file through one `ssh` session. That avoids repeated password prompts and keeps stdin available for interactive programs.
 

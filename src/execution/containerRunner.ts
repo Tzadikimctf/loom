@@ -91,6 +91,12 @@ interface lotusWslConfig {
   interactive?: boolean;
 }
 
+interface lotusOciPersistentConfig {
+  enabled: boolean;
+  name?: string;
+  keepAliveCommand?: string;
+}
+
 interface lotusContainerElevationConfig {
   mode: lotusContainerElevationMode;
   commandPrefix?: string;
@@ -100,6 +106,7 @@ interface lotusContainerConfig {
   runtime: lotusContainerRuntime;
   executable?: string;
   image?: string;
+  persistent?: lotusOciPersistentConfig;
   elevation: lotusContainerElevationConfig;
   wsl?: lotusWslConfig;
   healthCheck?: lotusCommandExpectation;
@@ -194,6 +201,9 @@ export class lotusContainerRunner {
             const pieces = [`runtime: ${config.runtime}`];
             if ((config.runtime === "docker" || config.runtime === "podman") && hasDockerfile) {
               pieces.push("Dockerfile");
+            }
+            if ((config.runtime === "docker" || config.runtime === "podman") && config.persistent?.enabled) {
+              pieces.push(`persistent: ${this.persistentOciContainerName(entry.name, config)}`);
             }
             if (config.runtime === "ssh" && config.ssh?.target) {
               pieces.push(`ssh: ${config.ssh.target}`);
@@ -347,6 +357,13 @@ export class lotusContainerRunner {
       throw new Error("Container command is empty.");
     }
 
+    if (config.persistent?.enabled) {
+      const workingDirectoryNotice = useContextWorkingDirectory
+        ? "[Lotus] Persistent Docker/Podman containers run in /workspace; lotus-cwd is not mounted for exec runs."
+        : undefined;
+      return this.runPersistentOciContainer(groupName, groupPath, config, image, workspacePath, command, context, workingDirectoryNotice);
+    }
+
     return await runProcess({
       runnerId: `container:${groupName}`,
       runnerName: `${runtimeLabel(config.runtime)} ${groupName}`,
@@ -372,6 +389,131 @@ export class lotusContainerRunner {
       onStdout: context.onStdout,
       onStderr: context.onStderr,
     });
+  }
+
+  private async runPersistentOciContainer(
+    groupName: string,
+    groupPath: string,
+    config: lotusContainerConfig,
+    image: string,
+    workspacePath: string,
+    command: string[],
+    context: lotusRunContext,
+    workingDirectoryNotice: string | undefined,
+  ): Promise<lotusRunResult> {
+    const runtime = this.runtimeExecutable(config);
+    const containerName = this.persistentOciContainerName(groupName, config);
+    const lifecycleNotice = await this.ensurePersistentOciContainer(groupName, groupPath, config, image, workspacePath, context);
+    const result = await runProcess({
+      runnerId: `container:${groupName}:exec`,
+      runnerName: `${runtimeLabel(config.runtime)} ${groupName}`,
+      executable: runtime,
+      args: [
+        "exec",
+        ...(context.stdin != null || context.stdinSession ? ["-i"] : []),
+        "-w",
+        workspacePath,
+        ...this.ociElevationArgs(config),
+        containerName,
+        ...command,
+      ],
+      workingDirectory: groupPath,
+      timeoutMs: context.timeoutMs,
+      signal: context.signal,
+      stdin: context.stdin,
+      stdinSession: context.stdinSession,
+      onStdout: context.onStdout,
+      onStderr: context.onStderr,
+    });
+
+    const notices = [lifecycleNotice, workingDirectoryNotice].filter((notice): notice is string => Boolean(notice));
+    if (notices.length) {
+      const notice = notices.join("\n");
+      result.warning = result.warning ? `${notice}\n${result.warning}` : notice;
+    }
+    return result;
+  }
+
+  private async ensurePersistentOciContainer(
+    groupName: string,
+    groupPath: string,
+    config: lotusContainerConfig,
+    image: string,
+    workspacePath: string,
+    context: lotusRunContext,
+  ): Promise<string | undefined> {
+    const runtime = this.runtimeExecutable(config);
+    const containerName = this.persistentOciContainerName(groupName, config);
+    const inspect = await runProcess({
+      runnerId: `container:${groupName}:inspect`,
+      runnerName: `${runtimeLabel(config.runtime)} ${groupName} inspect`,
+      executable: runtime,
+      args: ["inspect", "--format", "{{.State.Running}}", containerName],
+      workingDirectory: groupPath,
+      timeoutMs: context.timeoutMs,
+      signal: context.signal,
+    });
+
+    if (inspect.success) {
+      if (inspect.stdout.trim() === "true") {
+        return undefined;
+      }
+      const start = await runProcess({
+        runnerId: `container:${groupName}:start`,
+        runnerName: `${runtimeLabel(config.runtime)} ${groupName} start`,
+        executable: runtime,
+        args: ["start", containerName],
+        workingDirectory: groupPath,
+        timeoutMs: context.timeoutMs,
+        signal: context.signal,
+      });
+      if (!start.success) {
+        throw new Error(start.stderr || start.stdout || `Failed to start persistent ${runtimeLabel(config.runtime)} container ${containerName}.`);
+      }
+      return `[Lotus] Started persistent ${runtimeLabel(config.runtime)} container ${containerName}.`;
+    }
+
+    const keepAliveCommand = config.persistent?.keepAliveCommand?.trim() || "sleep infinity";
+    const create = await runProcess({
+      runnerId: `container:${groupName}:create`,
+      runnerName: `${runtimeLabel(config.runtime)} ${groupName} create`,
+      executable: runtime,
+      args: [
+        "create",
+        "--name",
+        containerName,
+        "-v",
+        `${groupPath}:${workspacePath}`,
+        "-w",
+        workspacePath,
+        ...this.ociElevationArgs(config),
+        image,
+        "sh",
+        "-lc",
+        keepAliveCommand,
+      ],
+      workingDirectory: groupPath,
+      timeoutMs: context.timeoutMs,
+      signal: context.signal,
+    });
+    if (!create.success) {
+      throw new Error(create.stderr || create.stdout || `Failed to create persistent ${runtimeLabel(config.runtime)} container ${containerName}.`);
+    }
+
+    const start = await runProcess({
+      runnerId: `container:${groupName}:start`,
+      runnerName: `${runtimeLabel(config.runtime)} ${groupName} start`,
+      executable: runtime,
+      args: ["start", containerName],
+      workingDirectory: groupPath,
+      timeoutMs: context.timeoutMs,
+      signal: context.signal,
+    });
+    if (!start.success) {
+      throw new Error(start.stderr || start.stdout || `Failed to start persistent ${runtimeLabel(config.runtime)} container ${containerName}.`);
+    }
+
+    return `[Lotus] Created and started persistent ${runtimeLabel(config.runtime)} container ${containerName}.`;
   }
 
   private async runQemu(
@@ -890,6 +1032,7 @@ export class lotusContainerRunner {
       runtime?: unknown;
       executable?: unknown;
       image?: unknown;
+      persistent?: unknown;
       wsl?: unknown;
       healthCheck?: unknown;
       outputFilters?: unknown;
@@ -935,6 +1078,7 @@ export class lotusContainerRunner {
       runtime,
       executable: typeof data.executable === "string" && data.executable.trim() ? data.executable.trim() : undefined,
       image: typeof data.image === "string" ? data.image : undefined,
+      persistent: this.readPersistentConfig(data.persistent),
       elevation: this.readElevationConfig(data.elevation),
       wsl: this.readWslConfig(data.wsl),
       healthCheck: this.readHealthCheck(data.healthCheck, "Container config healthCheck"),
@@ -962,6 +1106,33 @@ export class lotusContainerRunner {
       throw new Error(`Container runtime ${runtime} is not included in this Lotus build.`);
     }
     return runtime;
+  }
+
+  private readPersistentConfig(value: unknown): lotusOciPersistentConfig | undefined {
+    if (value == null || value === false) {
+      return undefined;
+    }
+    if (value === true) {
+      return { enabled: true };
+    }
+    if (!isRecord(value)) {
+      throw new Error("Container config persistent must be a boolean or object.");
+    }
+    if (value.enabled != null && typeof value.enabled !== "boolean") {
+      throw new Error("Container config persistent.enabled must be a boolean.");
+    }
+    if (value.name != null && typeof value.name !== "string") {
+      throw new Error("Container config persistent.name must be a string.");
+    }
+    if (value.keepAliveCommand != null && typeof value.keepAliveCommand !== "string") {
+      throw new Error("Container config persistent.keepAliveCommand must be a string.");
+    }
+
+    return {
+      enabled: value.enabled === true,
+      name: optionalString(value.name),
+      keepAliveCommand: optionalString(value.keepAliveCommand),
+    };
   }
 
   private readWslConfig(value: unknown): lotusWslConfig | undefined {
@@ -1593,6 +1764,10 @@ export class lotusContainerRunner {
 
   private imageNameForGroup(groupName: string): string {
     return `lotus-container-${groupName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-")}`;
+  }
+
+  private persistentOciContainerName(groupName: string, config: lotusContainerConfig): string {
+    return config.persistent?.name?.trim() || `${this.imageNameForGroup(groupName)}-persistent`;
   }
 
   public getDefaultLanguageConfig(langId: string, settings: lotusPluginSettings): lotusContainerLanguageConfig | null {

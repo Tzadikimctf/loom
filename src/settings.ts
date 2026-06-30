@@ -60,6 +60,13 @@ interface lotusContainerEditorWslConfig {
   [key: string]: unknown;
 }
 
+interface lotusContainerEditorPersistentConfig {
+  enabled?: boolean;
+  name?: string;
+  keepAliveCommand?: string;
+  [key: string]: unknown;
+}
+
 interface lotusContainerEditorCustomConfig {
   executable?: string;
   args?: string;
@@ -87,6 +94,7 @@ interface lotusContainerEditorLanguageConfig {
 interface lotusContainerEditorConfig {
   runtime?: lotusContainerEditorRuntime;
   image?: string;
+  persistent?: boolean | lotusContainerEditorPersistentConfig;
   elevation?: lotusContainerEditorElevation;
   wsl?: lotusContainerEditorWslConfig;
   ssh?: lotusContainerEditorRemoteConfig;
@@ -1316,6 +1324,47 @@ class EditContainerGroupModal extends Modal {
         });
     }
 
+    if (this.configObj.runtime === "docker" || this.configObj.runtime === "podman") {
+      const persistent = this.getPersistentConfig();
+      new Setting(containerEl)
+        .setName("Persistent container")
+        .setDesc("Start this Docker/Podman container once and run snippets through exec so filesystem and process state can persist between runs.")
+        .addToggle((toggle) => {
+          toggle
+            .setValue(persistent.enabled === true)
+            .onChange((value) => {
+              persistent.enabled = value;
+              this.renderActiveTab();
+            });
+        });
+
+      if (persistent.enabled) {
+        new Setting(containerEl)
+          .setName("Persistent container name")
+          .setDesc("Optional stable container name. Leave blank to derive one from the execution group name.")
+          .addText((text) => {
+            text
+              .setPlaceholder(`lotus-container-${this.groupName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-")}-persistent`)
+              .setValue(persistent.name || "")
+              .onChange((val) => {
+                persistent.name = val.trim() || undefined;
+              });
+          });
+
+        new Setting(containerEl)
+          .setName("Keep-alive command")
+          .setDesc("Command used as the persistent container's main process.")
+          .addText((text) => {
+            text
+              .setPlaceholder("sleep infinity")
+              .setValue(persistent.keepAliveCommand || "")
+              .onChange((val) => {
+                persistent.keepAliveCommand = val.trim() || undefined;
+              });
+          });
+      }
+    }
+
     if (!this.configObj.elevation || typeof this.configObj.elevation !== "object") {
       this.configObj.elevation = { mode: "default" };
     }
@@ -1491,8 +1540,15 @@ class EditContainerGroupModal extends Modal {
             .onChange((val) => {
               custom.args = val.trim() || undefined;
             });
-        });
+      });
     }
+  }
+
+  getPersistentConfig(): lotusContainerEditorPersistentConfig {
+    if (!this.configObj.persistent || typeof this.configObj.persistent !== "object" || Array.isArray(this.configObj.persistent)) {
+      this.configObj.persistent = { enabled: this.configObj.persistent === true };
+    }
+    return this.configObj.persistent;
   }
 
   renderRemoteTransportSettings(containerEl: HTMLElement, remoteConfig: lotusContainerEditorRemoteConfig, includeSshSettings: boolean) {
