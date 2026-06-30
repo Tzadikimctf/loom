@@ -40,6 +40,8 @@ text/plain
 
 SVG values are raw SVG strings. Raster image values are base64 strings unless they already include a `data:` URL.
 
+Custom MIME types can be emitted in the same `data` object. If no trusted renderer is registered for that MIME type, Lotus falls back to JSON/text rendering or reports the display data as unsupported.
+
 ## External Process Channel
 
 Every local process receives these environment variables:
@@ -66,9 +68,55 @@ display.png(base64Png, { title: "PNG" });
 display.jpeg(base64Jpeg, { title: "JPEG" });
 display.image(base64Image, { mimeType: "image/gif", title: "GIF" });
 display.mime({ "application/json": { ok: true } }, { title: "Data" });
+display.mime({ "application/vnd.my-tool.image+json": { path: "diagram.bin" } }, { title: "Custom image" });
 ```
 
-Graphviz displays use `text/vnd.graphviz`. When Graphviz is configured, Lotus runs `dot -Tsvg` and adds an `image/svg+xml` representation.
+Graphviz displays use `text/vnd.graphviz`. When Graphviz is configured, Lotus runs `dot -Tsvg` and adds an `image/svg+xml` representation. If the block resolves to an execution group, Lotus runs Graphviz inside that group with the synthetic `graphviz` language instead of requiring `dot` on the host.
+
+## Custom MIME Renderers
+
+Custom MIME renderers are trusted JavaScript connectors registered with the Lotus plugin instance. Display records may carry arbitrary MIME bundles, but Lotus does not execute JavaScript from display output. A connector decides how its MIME payload is loaded and rendered. Builds that omit the `rich-displays` feature treat registration as a no-op.
+
+```typescript
+declare function loadImageUrlFromPayload(value: unknown): string;
+
+const lotus = app.plugins.plugins.lotus as {
+  registerDisplayRenderer?: (renderer: {
+    id?: string;
+    mimeTypes: readonly string[];
+    render: (
+      container: HTMLElement,
+      context: {
+        mime: string;
+        value: unknown;
+        display: { title?: string };
+        metadata: Record<string, unknown>;
+        visibleLines: number;
+      },
+    ) => void | (() => void) | Promise<void | (() => void)>;
+  }) => () => void;
+};
+
+const unregister = lotus.registerDisplayRenderer?.({
+  id: "my-tool-image",
+  mimeTypes: ["application/vnd.my-tool.image+json", "image/tiff"],
+  render(container, context) {
+    const url = loadImageUrlFromPayload(context.value);
+    const image = container.createEl("img", {
+      attr: {
+        src: url,
+        alt: String(context.metadata.alt ?? context.display.title ?? "Custom image"),
+      },
+    });
+    return () => {
+      URL.revokeObjectURL(url);
+      image.remove();
+    };
+  },
+});
+```
+
+`mimeTypes` supports exact MIME matches, `type/*` wildcards, and `*/*`. Custom renderers run before the built-in renderer priority. Register the returned cleanup function with the owning plugin so the renderer is removed when that connector unloads.
 
 ## Visualization Attributes
 
@@ -79,7 +127,7 @@ lotus-visualize=graphviz
 lotus-visualize=svg
 ```
 
-`graphviz`, `dot`, `gv`, and `cfg` are accepted Graphviz aliases. `svg` and `image/svg+xml` are accepted SVG aliases. `false`, `off`, `none`, and similar values disable synthesis.
+`graphviz`, `dot`, `gv`, and `cfg` are accepted Graphviz aliases. `svg` and `image/svg+xml` are accepted SVG aliases. `false`, `off`, `none`, and similar values disable synthesis. The toolbar source graph button is enabled by default and can be hidden with the **Show code graph button** setting.
 
 ## UI Behavior
 
@@ -87,4 +135,4 @@ Image displays render on a white viewport with zoom controls. Zoom preserves the
 
 ## Current Non-Goals
 
-Lotus does not render arbitrary interactive HTML in this contract. Plotly or other interactive plotting libraries should be added later as optional, feature-gated renderers rather than as a baseline display dependency.
+Lotus does not render arbitrary interactive HTML in this contract. Plotly or other interactive plotting libraries should be added as trusted custom renderers rather than as baseline display dependencies.

@@ -1,8 +1,15 @@
 import { setIcon } from "obsidian";
-import type { lotusDisplayOutput, lotusSourcePreviewStage, lotusStoredOutput } from "../types";
+import type {
+  lotusDisplayOutput,
+  lotusDisplayRenderer,
+  lotusDisplayRendererCleanup,
+  lotusSourcePreviewStage,
+  lotusStoredOutput,
+} from "../types";
 
 interface lotusOutputPanelOptions {
   defaultVisibleLines: number;
+  displayRenderers?: readonly lotusDisplayRenderer[];
 }
 
 export interface lotusRunningPanelOptions {
@@ -58,7 +65,7 @@ export function renderOutputPanel(panel: HTMLElement, output: lotusStoredOutput,
   }
   if (output.result.displays?.length) {
     for (const display of output.result.displays) {
-      createDisplay(body, display, visibleLines);
+      createDisplay(body, display, visibleLines, options.displayRenderers ?? []);
     }
   }
   if (output.sourcePreview?.content.trim()) {
@@ -87,12 +94,18 @@ function createStream(container: HTMLElement, label: string, content: string, vi
   }
 }
 
-function createDisplay(container: HTMLElement, display: lotusDisplayOutput, visibleLines: number): void {
+function createDisplay(
+  container: HTMLElement,
+  display: lotusDisplayOutput,
+  visibleLines: number,
+  displayRenderers: readonly lotusDisplayRenderer[],
+): void {
   const section = container.createDiv({ cls: "lotus-output-display" });
-  const selected = selectDisplayMime(display);
+  const custom = selectCustomDisplayRenderer(display, displayRenderers);
+  const selected = custom ?? selectDisplayMime(display);
   section.createDiv({
     cls: "lotus-output-stream-label",
-    text: formatDisplayLabel(display, selected?.mime),
+    text: formatDisplayLabel(display, custom ? undefined : selected?.mime),
   });
 
   if (!selected) {
@@ -100,6 +113,11 @@ function createDisplay(container: HTMLElement, display: lotusDisplayOutput, visi
       cls: "lotus-output-pre",
       text: `Unsupported display data: ${Object.keys(display.data).join(", ") || "(empty)"}`,
     });
+    return;
+  }
+
+  if (custom) {
+    renderCustomDisplay(section, display, custom, visibleLines);
     return;
   }
 
@@ -114,6 +132,51 @@ function createDisplay(container: HTMLElement, display: lotusDisplayOutput, visi
   }
 
   createTextDisplay(section, typeof selected.value === "string" ? selected.value : JSON.stringify(selected.value, null, 2), visibleLines);
+}
+
+function renderCustomDisplay(
+  section: HTMLElement,
+  display: lotusDisplayOutput,
+  selected: SelectedCustomDisplayRenderer,
+  visibleLines: number,
+): void {
+  try {
+    const cleanup = selected.renderer.render(section, {
+      mime: selected.mime,
+      value: selected.value,
+      display,
+      metadata: readDisplayMetadata(display, selected.mime),
+      visibleLines,
+    });
+    if (isPromiseLike(cleanup)) {
+      cleanup
+        .then((resolvedCleanup) => {
+          installDisplayCleanup(section, resolvedCleanup);
+        })
+        .catch((error: unknown) => {
+          renderCustomDisplayError(section, display, selected.mime, error, visibleLines);
+        });
+      return;
+    }
+    installDisplayCleanup(section, cleanup);
+  } catch (error) {
+    renderCustomDisplayError(section, display, selected.mime, error, visibleLines);
+  }
+}
+
+function renderCustomDisplayError(
+  section: HTMLElement,
+  display: lotusDisplayOutput,
+  mime: string,
+  error: unknown,
+  visibleLines: number,
+): void {
+  section.empty();
+  section.createDiv({
+    cls: "lotus-output-stream-label",
+    text: formatDisplayLabel(display, mime),
+  });
+  createTextDisplay(section, `Custom display renderer failed: ${formatUnknownError(error)}`, visibleLines);
 }
 
 function createImageDisplay(container: HTMLElement, display: lotusDisplayOutput, mime: string, value: string): void {
@@ -331,7 +394,7 @@ function installImagePan(viewport: HTMLElement): void {
     try {
       viewport.releasePointerCapture(event.pointerId);
     } catch {
-      // The browser may have already released capture.
+      return;
     }
   };
 
@@ -402,6 +465,91 @@ function selectDisplayMime(display: lotusDisplayOutput): { mime: string; value: 
 
   const firstMime = Object.keys(display.data)[0];
   return firstMime ? { mime: firstMime, value: display.data[firstMime] } : null;
+}
+
+interface SelectedCustomDisplayRenderer {
+  renderer: lotusDisplayRenderer;
+  mime: string;
+  value: unknown;
+}
+
+function selectCustomDisplayRenderer(
+  display: lotusDisplayOutput,
+  displayRenderers: readonly lotusDisplayRenderer[],
+): SelectedCustomDisplayRenderer | null {
+  if (!displayRenderers.length) {
+    return null;
+  }
+
+  for (const mime of Object.keys(display.data)) {
+    const renderer = displayRenderers.find((candidate) => supportsDisplayMime(candidate, mime));
+    if (renderer) {
+      return { renderer, mime, value: display.data[mime] };
+    }
+  }
+
+  return null;
+}
+
+function supportsDisplayMime(renderer: lotusDisplayRenderer, mime: string): boolean {
+  return renderer.mimeTypes.some((pattern) => matchesMimePattern(pattern, mime));
+}
+
+function matchesMimePattern(pattern: string, mime: string): boolean {
+  const normalizedPattern = pattern.trim().toLowerCase();
+  const normalizedMime = mime.trim().toLowerCase();
+  if (!normalizedPattern || !normalizedMime) {
+    return false;
+  }
+  if (normalizedPattern === normalizedMime || normalizedPattern === "*/*") {
+    return true;
+  }
+  if (normalizedPattern.endsWith("/*")) {
+    return normalizedMime.startsWith(normalizedPattern.slice(0, -1));
+  }
+  return false;
+}
+
+function installDisplayCleanup(section: HTMLElement, cleanup: void | lotusDisplayRendererCleanup): void {
+  if (typeof cleanup !== "function") {
+    return;
+  }
+
+  let cleaned = false;
+  const runCleanup = () => {
+    if (cleaned) {
+      return;
+    }
+    cleaned = true;
+    observer.disconnect();
+    try {
+      cleanup();
+    } catch {
+      return;
+    }
+  };
+  const observer = new MutationObserver(() => {
+    if (!section.isConnected) {
+      runCleanup();
+    }
+  });
+
+  observer.observe(activeDocument.body, { childList: true, subtree: true });
+  requestAnimationFrame(() => {
+    if (!section.isConnected) {
+      runCleanup();
+    }
+  });
+}
+
+function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
+  return typeof value === "object"
+    && value !== null
+    && typeof (value as { then?: unknown }).then === "function";
+}
+
+function formatUnknownError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function formatDisplayLabel(display: lotusDisplayOutput, mime: string | undefined): string {

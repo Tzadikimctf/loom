@@ -118,7 +118,7 @@ Blocks can receive standard input through the toolbar input control or through a
 
 ## Rich Displays
 
-Lotus can render rich display outputs in addition to stdout and stderr. Display outputs use MIME bundles inspired by Jupyter outputs. Supported render targets include `image/svg+xml`, `image/png`, `image/jpeg`, `image/gif`, `text/vnd.graphviz`, `application/json`, and `text/plain`. The full producer contract is documented in [Rich Display Contract](docs/display-contract.md).
+Lotus can render rich display outputs in addition to stdout and stderr. Display outputs use MIME bundles inspired by Jupyter outputs. Supported render targets include `image/svg+xml`, `image/png`, `image/jpeg`, `image/gif`, `text/vnd.graphviz`, `application/json`, and `text/plain`. Trusted plugins can register custom MIME renderers for application-specific payloads. The full producer contract is documented in [Rich Display Contract](docs/display-contract.md).
 
 Obsidian JavaScript blocks receive a `display` helper:
 
@@ -138,7 +138,7 @@ External processes can append JSON records to the path in `LOTUS_DISPLAY_JSONL`:
 {"title":"CFG","role":"visualization","data":{"text/vnd.graphviz":"digraph g { a -> b }","text/plain":"CFG graph"}}
 ```
 
-When a display contains `text/vnd.graphviz`, Lotus runs the configured Graphviz executable (`dot` by default) to add an SVG representation. Use the toolbar visualize button or command palette action to run a block and treat stdout as Graphviz DOT. Blocks can request this persistently with `lotus-visualize=graphviz`, or treat stdout as SVG with `lotus-visualize=svg`.
+When a display contains `text/vnd.graphviz`, Lotus runs the configured Graphviz executable (`dot` by default) to add an SVG representation. If the block resolves to an execution group, Graphviz runs inside that group with the synthetic `graphviz` language. Use the toolbar visualize button or command palette action to run a block and treat stdout as Graphviz DOT. The toolbar button is enabled by default and can be hidden in settings. Blocks can request visualization persistently with `lotus-visualize=graphviz`, or treat stdout as SVG with `lotus-visualize=svg`.
 
 Rich displays are controlled by the `rich-displays` compile feature. Light builds can omit that feature to remove image/plot/source-visualization surfaces:
 

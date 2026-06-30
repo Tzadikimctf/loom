@@ -95,6 +95,25 @@ export interface lotusDisplayOutput {
   metadata?: Record<string, unknown>;
 }
 
+export type lotusDisplayRendererCleanup = () => void;
+
+export interface lotusDisplayRendererContext {
+  mime: string;
+  value: unknown;
+  display: lotusDisplayOutput;
+  metadata: Record<string, unknown>;
+  visibleLines: number;
+}
+
+export interface lotusDisplayRenderer {
+  id?: string;
+  mimeTypes: readonly string[];
+  render(
+    container: HTMLElement,
+    context: lotusDisplayRendererContext,
+  ): void | lotusDisplayRendererCleanup | Promise<void | lotusDisplayRendererCleanup>;
+}
+
 export interface lotusRunner {
   id: string;
   displayName: string;
@@ -176,6 +195,7 @@ export interface lotusPluginSettings {
   writeOutputToNote: boolean;
   outputVisibleLines: number;
   autoRunOnFileOpen: boolean;
+  showCodeVisualizationButton: boolean;
   hashCodeBlocks: boolean;
   signingMode: "passphrase" | "rsa" | "ssh";
   signingSignerId: string;
