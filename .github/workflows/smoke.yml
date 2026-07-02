@@ -146,6 +146,7 @@ jobs:
     if: ${{ always() }}
     steps:
       - name: Publish required status contexts
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -170,3 +171,10 @@ jobs:
           done
 
           test "${state}" = "success"
+      - name: Enforce smoke matrix result for fork pull requests
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        env:
+          RESULT: ${{ needs.smoke-matrix.result }}
+        run: |
+          echo "Skipping synthetic commit statuses for fork pull request; GITHUB_TOKEN is read-only."
+          test "${RESULT}" = "success"
